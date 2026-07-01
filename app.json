@@ -1,25 +1,49 @@
 {
   "expo": {
-    "name": "filter-cam",
+    "name": "FilterCam",
     "slug": "filter-cam",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "scheme": "filtercam",
+    "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.haywan.filtercam",
+      "infoPlist": {
+        "NSCameraUsageDescription": "FilterCam uses the camera to show live beauty and mustache filters.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.haywan.filtercam",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0b0b0f",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "FilterCam uses the camera to show live beauty and mustache filters."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "6449d0d2-fa60-4cfc-a79a-644eab24da62"
+      }
     }
   }
 }

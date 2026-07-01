@@ -1,20 +1,29 @@
+import { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView, StyleSheet } from 'react-native';
+import HomeScreen from './src/screens/HomeScreen';
+import CameraScreen from './src/screens/CameraScreen';
+
+type Screen = 'home' | 'camera';
 
 export default function App() {
+  const [screen, setScreen] = useState<Screen>('home');
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
+    <SafeAreaView style={styles.root}>
+      <StatusBar style="light" />
+      {screen === 'home' ? (
+        <HomeScreen onOpenCamera={() => setScreen('camera')} />
+      ) : (
+        <CameraScreen onClose={() => setScreen('home')} />
+      )}
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: '#0b0b0f',
   },
 });
