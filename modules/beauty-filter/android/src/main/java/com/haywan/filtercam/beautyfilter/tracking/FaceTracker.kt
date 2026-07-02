@@ -1,4 +1,4 @@
-package com.haywan.filtercam.beautyfilter
+package com.haywan.filtercam.beautyfilter.tracking
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -17,13 +17,18 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
  * Runs MediaPipe Face Landmarker (478-point face mesh) on camera frames in
  * live-stream mode and publishes temporally smoothed, display-oriented
  * normalized landmarks to the renderer.
+ *
+ * Multi-face: up to [MAX_FACES] faces are tracked. Each detected face is emitted
+ * as its own `FloatArray` of `478 * 2` normalized (x, y) coordinates; the whole
+ * frame is delivered as an `Array<FloatArray>` (empty array = no faces).
+ * Smoothing is applied per face index and reset whenever the face count changes.
  */
-class FaceTracker(
+internal class FaceTracker(
     context: Context,
-    private val onLandmarks: (FloatArray?) -> Unit,
+    private val onFaces: (Array<FloatArray>) -> Unit,
 ) {
     private val landmarker: FaceLandmarker
-    private var smoothed: FloatArray? = null
+    private var smoothed: Array<FloatArray>? = null
     private var lastResultAt = 0L
 
     @Volatile var isFrontCamera = true
@@ -45,7 +50,7 @@ class FaceTracker(
         val options = FaceLandmarker.FaceLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.LIVE_STREAM)
-            .setNumFaces(1)
+            .setNumFaces(MAX_FACES)
             .setMinFaceDetectionConfidence(0.5f)
             .setMinFacePresenceConfidence(0.5f)
             .setMinTrackingConfidence(0.5f)
@@ -77,34 +82,46 @@ class FaceTracker(
     }
 
     private fun handleResult(result: FaceLandmarkerResult) {
-        val face = result.faceLandmarks().firstOrNull()
-        if (face == null) {
+        val faces = result.faceLandmarks()
+        if (faces.isNullOrEmpty()) {
             smoothed = null
-            onLandmarks(null)
+            onFaces(emptyArray())
             return
         }
 
         val now = SystemClock.uptimeMillis()
-        val fresh = FloatArray(face.size * 2)
-        for (i in face.indices) {
-            fresh[i * 2] = face[i].x()
-            fresh[i * 2 + 1] = face[i].y()
+        val fresh = Array(faces.size) { f ->
+            val face = faces[f]
+            FloatArray(face.size * 2).also { out ->
+                for (i in face.indices) {
+                    out[i * 2] = face[i].x()
+                    out[i * 2 + 1] = face[i].y()
+                }
+            }
         }
 
         val prev = smoothed
-        val out: FloatArray
-        if (prev == null || prev.size != fresh.size || now - lastResultAt > 300) {
-            out = fresh
-        } else {
-            // Exponential smoothing to keep the mask and mustache stable.
-            out = FloatArray(fresh.size)
-            for (i in fresh.indices) {
-                out[i] = prev[i] + (fresh[i] - prev[i]) * SMOOTHING_ALPHA
+        // Reset smoothing when the number of faces changes or after a gap, since
+        // face ordering is not guaranteed stable across those boundaries.
+        val out: Array<FloatArray> =
+            if (prev == null || prev.size != fresh.size || now - lastResultAt > 300) {
+                fresh
+            } else {
+                Array(fresh.size) { f ->
+                    val p = prev[f]
+                    val n = fresh[f]
+                    if (p.size != n.size) {
+                        n
+                    } else {
+                        FloatArray(n.size) { i -> p[i] + (n[i] - p[i]) * SMOOTHING_ALPHA }
+                    }
+                }
             }
-        }
+
         smoothed = out
         lastResultAt = now
-        onLandmarks(out.copyOf())
+        // Deep-copy so the renderer never reads a buffer we mutate next frame.
+        onFaces(Array(out.size) { out[it].copyOf() })
     }
 
     fun release() {
@@ -119,5 +136,6 @@ class FaceTracker(
         private const val TAG = "FaceTracker"
         private const val MODEL_ASSET = "face_landmarker.task"
         private const val SMOOTHING_ALPHA = 0.55f
+        private const val MAX_FACES = 5
     }
 }

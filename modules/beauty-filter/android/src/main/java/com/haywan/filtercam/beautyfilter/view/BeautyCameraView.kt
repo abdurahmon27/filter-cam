@@ -1,20 +1,13 @@
-package com.haywan.filtercam.beautyfilter
+package com.haywan.filtercam.beautyfilter.view
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.opengl.GLSurfaceView
+import android.os.SystemClock
 import android.util.Log
-import android.view.Surface
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.core.SurfaceRequest
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.haywan.filtercam.beautyfilter.render.BeautyRenderer
+import com.haywan.filtercam.beautyfilter.tracking.FaceTracker
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.views.ExpoView
@@ -23,14 +16,36 @@ import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+/**
+ * The React-Native-facing view. Hosts a [GLSurfaceView] driven by
+ * [BeautyRenderer], wires a [CameraController] to it, and runs a [FaceTracker]
+ * that publishes landmarks to the renderer. Props and `takePicture` are routed
+ * here from the Expo module definition.
+ */
 class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
 
     private val glView = GLSurfaceView(context)
     private val renderer = BeautyRenderer(::onSurfaceTextureReady)
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
     @Volatile private var tracker: FaceTracker? = null
-    private var cameraProvider: ProcessCameraProvider? = null
+    private val cameraController = CameraController(
+        context = context,
+        analysisExecutor = analysisExecutor,
+        surfaceTextureProvider = { renderer.surfaceTexture },
+        onBufferSize = { w, h ->
+            renderer.cameraBufferWidth = w
+            renderer.cameraBufferHeight = h
+        },
+        onFrame = { proxy ->
+            // Single source of truth for orientation: the same rotation the
+            // FaceTracker uses to make landmarks upright drives the preview.
+            renderer.cameraRotationDegrees = proxy.imageInfo.rotationDegrees
+            tracker?.analyze(proxy) ?: proxy.close()
+        },
+    )
+
     private var surfaceReady = false
     private var facingFront = true
 
@@ -42,9 +57,9 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         // Model loading (~4 MB) happens off the main thread.
         analysisExecutor.execute {
             tracker = try {
-                FaceTracker(context) { lms ->
-                    renderer.landmarks = lms
-                    renderer.landmarksAt = if (lms != null) android.os.SystemClock.uptimeMillis() else 0L
+                FaceTracker(context) { faces ->
+                    renderer.faces = faces
+                    renderer.facesAt = if (faces.isNotEmpty()) SystemClock.uptimeMillis() else 0L
                 }.also { it.isFrontCamera = facingFront }
             } catch (t: Throwable) {
                 Log.e(TAG, "FaceTracker init failed; filters will be inactive", t)
@@ -107,8 +122,7 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        cameraProvider?.unbindAll()
-        cameraProvider = null
+        cameraController.unbind()
         analysisExecutor.execute {
             tracker?.release()
             tracker = null
@@ -124,65 +138,7 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
             Log.e(TAG, "No LifecycleOwner activity; cannot start camera")
             return
         }
-        val future = ProcessCameraProvider.getInstance(context)
-        future.addListener({
-            try {
-                val provider = future.get()
-                cameraProvider = provider
-                provider.unbindAll()
-
-                val selector = if (facingFront) {
-                    CameraSelector.DEFAULT_FRONT_CAMERA
-                } else {
-                    CameraSelector.DEFAULT_BACK_CAMERA
-                }
-
-                val ratio43 = ResolutionSelector.Builder()
-                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                    .build()
-
-                val preview = Preview.Builder()
-                    .setResolutionSelector(ratio43)
-                    .setTargetRotation(Surface.ROTATION_0)
-                    .build()
-                preview.setSurfaceProvider { request -> provideSurface(request) }
-
-                val analysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(ratio43)
-                    .setTargetRotation(Surface.ROTATION_0)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .build()
-                analysis.setAnalyzer(analysisExecutor) { proxy ->
-                    // Single source of truth for orientation: the camera texture
-                    // and the face landmarks must use the SAME rotation, otherwise
-                    // the preview and the filters disagree (video sideways while
-                    // filters stay upright). imageInfo.rotationDegrees is what the
-                    // FaceTracker already uses, so drive the renderer from it too.
-                    renderer.cameraRotationDegrees = proxy.imageInfo.rotationDegrees
-                    tracker?.analyze(proxy) ?: proxy.close()
-                }
-
-                provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
-            } catch (t: Throwable) {
-                Log.e(TAG, "Camera bind failed", t)
-            }
-        }, ContextCompat.getMainExecutor(context))
-    }
-
-    private fun provideSurface(request: SurfaceRequest) {
-        val surfaceTexture = renderer.surfaceTexture
-        if (surfaceTexture == null) {
-            request.willNotProvideSurface()
-            return
-        }
-        renderer.cameraBufferWidth = request.resolution.width
-        renderer.cameraBufferHeight = request.resolution.height
-        surfaceTexture.setDefaultBufferSize(request.resolution.width, request.resolution.height)
-        val surface = Surface(surfaceTexture)
-        request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {
-            surface.release()
-        }
+        cameraController.bind(lifecycleOwner, facingFront)
     }
 
     private fun saveBitmap(bitmap: Bitmap, promise: Promise) {

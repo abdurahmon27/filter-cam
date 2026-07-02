@@ -1,6 +1,9 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "ios"],
   "android": {
     "modules": ["com.haywan.filtercam.beautyfilter.BeautyFilterModule"]
+  },
+  "ios": {
+    "modules": ["BeautyFilterModule"]
   }
 }

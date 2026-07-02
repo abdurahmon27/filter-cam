@@ -1,11 +1,11 @@
-package com.haywan.filtercam.beautyfilter
+package com.haywan.filtercam.beautyfilter.tracking
 
 /**
  * Landmark index rings on the MediaPipe Face Mesh (478-point canonical topology).
  * Each ring is an ordered closed loop, so it can be drawn as a triangle fan
  * around its centroid.
  */
-object FaceTopology {
+internal object FaceTopology {
     val FACE_OVAL = intArrayOf(
         10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
         397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,

@@ -1,10 +1,11 @@
-// Local Expo native module: beauty-filter (Android, Kotlin)
+// Local Expo native module: beauty-filter
 //
-// The native side (android/src/main/java/com/haywan/filtercam/beautyfilter)
-// renders the camera through an OpenGL pipeline: MediaPipe Face Mesh tracks
-// the face, a gaussian-blur pass smooths skin only inside the face oval
-// (eyes, brows and lips are punched out of the mask), and a mustache sprite
-// is anchored to the nose/upper-lip landmarks.
+// Android (Kotlin + OpenGL ES) and iOS (Swift + Metal + Vision) both render the
+// camera through a GPU pipeline: a face tracker finds landmarks, a gaussian-blur
+// pass smooths skin only inside the face oval (eyes, brows and lips are punched
+// out of the mask), a glow lifts the skin, and a mustache sprite is anchored to
+// the nose/upper-lip landmarks. Up to 5 faces are handled at once.
+// See docs/ARCHITECTURE.md and modules/beauty-filter/ios/README-ios.md.
 import { requireNativeView, requireOptionalNativeModule } from 'expo';
 import type * as React from 'react';
 import type { ViewProps } from 'react-native';

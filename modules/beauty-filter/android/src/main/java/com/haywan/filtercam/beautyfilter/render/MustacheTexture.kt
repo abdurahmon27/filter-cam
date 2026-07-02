@@ -1,4 +1,4 @@
-package com.haywan.filtercam.beautyfilter
+package com.haywan.filtercam.beautyfilter.render
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -14,7 +14,7 @@ import android.opengl.GLUtils
  * needed) and uploads it as a GL texture. The texture is 2:1 and the shape is
  * vertically centered, so a quad centered on the philtrum lines up naturally.
  */
-object MustacheTexture {
+internal object MustacheTexture {
 
     const val ASPECT = 0.5f // height / width of the texture
 

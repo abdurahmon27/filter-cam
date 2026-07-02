@@ -13,7 +13,8 @@ implemented in **Kotlin** as a local Expo native module.
     landmarks, following position, scale and head roll in real time.
 - Flip camera + shutter button. Captures save the **filtered** frame (WYSIWYG).
 
-iOS support was removed for now — this is Android-only.
+Runs on **Android** (Kotlin + OpenGL ES) and **iOS** (Swift + Metal + Vision),
+both behind the same JS component. Up to **5 faces** are tracked at once.
 
 ## Tech stack — SDKs & packages
 
@@ -51,26 +52,36 @@ custom mask-driven blur written directly in GLSL.
 > the versioned docs at <https://docs.expo.dev/versions/v57.0.0/> before
 > touching the JS/config side.
 
-## How the native side works (`modules/beauty-filter/android`)
+## How the native side works (`modules/beauty-filter`)
+
+The Android module is organized by responsibility (see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full map):
 
 ```
-BeautyFilterModule.kt   # Expo module definition: props, takePicture()
-BeautyCameraView.kt     # ExpoView hosting a GLSurfaceView + CameraX binding
-FaceTracker.kt          # MediaPipe FaceLandmarker (live stream) + smoothing
-BeautyRenderer.kt       # GL pipeline: camera OES -> scene FBO -> blur ->
-                        # face-mask FBO -> composite -> mustache sprite
-FaceTopology.kt         # landmark index rings (face oval, eyes, brows, lips)
-MustacheTexture.kt      # mustache drawn with Canvas, uploaded as GL texture
-src/main/assets/face_landmarker.task  # MediaPipe face mesh model (~3.7 MB)
+android/.../beautyfilter/
+  BeautyFilterModule.kt     # Expo wiring: props, takePicture()
+  view/    BeautyCameraView.kt · CameraController.kt   # RN view + CameraX
+  tracking/ FaceTracker.kt · FaceTopology.kt           # MediaPipe, multi-face
+  render/  BeautyRenderer.kt (orchestrator) + one *Pass.kt per step
+           Viewport.kt (crop + coords) · MustacheTexture.kt
+  gl/      GlUtils · Framebuffer · ScreenQuad · Shaders
+  src/main/assets/face_landmarker.task   # MediaPipe face mesh model (~3.7 MB)
+
+ios/       BeautyFilterModule.swift · BeautyCameraView.swift
+           CameraController.swift (AVFoundation) · FaceTracker.swift (Vision)
+           MetalRenderer.swift · Shaders.metal · MustacheTexture.swift
+           README-ios.md   # Vision-vs-MediaPipe notes + first-build checklist
 ```
 
 Performance notes:
-- Camera frames never leave the GPU for rendering (OES texture -> shaders).
+- Camera frames never leave the GPU for rendering (OES/CVPixelBuffer -> shaders).
 - Face detection runs on a 4:3 analysis stream (`KEEP_ONLY_LATEST`) on its own
   thread; MediaPipe runs in LIVE_STREAM mode with a GPU delegate when
-  available (CPU fallback).
+  available (CPU fallback). Up to 5 faces are tracked.
 - The blur and mask passes run at quarter resolution; landmarks are
-  exponentially smoothed to keep the mask and mustache stable.
+  exponentially smoothed **per face** to keep the mask and mustache stable.
+- Beauty adds a subtle "glow" (brightness/warmth lift + highlight bloom) inside
+  the face mask for a younger, shinier look.
 
 ## JS layout
 
@@ -141,43 +152,41 @@ A candid assessment of the design, not a sales pitch.
 
 ### What's weak / where it falls short
 
-- **Android only, single platform.** iOS was removed, so all the native work is
-  non-portable. No shared abstraction to bring it back cheaply.
 - **Capture is preview-resolution, not sensor-resolution.** `glReadPixels` reads
   the on-screen framebuffer, so photos are limited to the view size rather than
   the full camera still — fine for a demo, not for a real camera app.
-- **Orientation/mirroring is portrait-locked and unverified.** The rotation and
-  center-crop math in `BeautyRenderer.drawCameraToScene` is written for a
-  portrait app and is flagged as needing an on-device sanity check; landscape or
-  odd sensor orientations will likely need tuning.
-- **Single face only.** `setNumFaces(1)` — the mask and mustache track one face;
-  group selfies aren't handled.
+- **The preview rotation offset is empirical.** `PREVIEW_ROTATION_OFFSET` in
+  `CameraPass` was tuned on a device to align the preview with the upright
+  landmark space; other sensors/orientations may need a different value.
+- **iOS is written but unverified.** The Swift/Metal/Vision module mirrors the
+  Android contract but was authored without a Mac to compile against — expect to
+  fix the metallib bundling, capture orientation, and the Vision-synthesized face
+  mask on first build (see `ios/README-ios.md`).
 - **Hand-rolled GL pipeline = maintenance surface.** Custom GLSL, FBOs and
   coordinate remapping are powerful but fragile; there are no automated tests
-  around the render/coordinate math, so regressions are easy to introduce and
-  hard to catch without a device.
+  around the render/coordinate math, so regressions are hard to catch without a
+  device. (The pipeline is now split into one class per pass, which helps.)
 - **No test coverage and no CI visible.** Correctness rests on manual on-device
-  checking. The mask/landmark/crop remapping in particular is exactly the kind
-  of math that benefits from tests.
-- **Beauty is blur-based only.** It's a mask-driven gaussian blur with a slight
-  brightness/contrast lift — no tone mapping, blemish removal, or
-  frequency-separation smoothing that dedicated beauty SDKs offer. That's a
-  reasonable scope choice, but it is a basic effect.
+  checking. The mask/landmark/crop remapping in particular benefits from tests.
+- **Beauty is blur-based.** A mask-driven gaussian blur plus a brightness/warmth
+  glow and highlight bloom — no frequency-separation smoothing or blemish removal
+  that dedicated beauty SDKs offer. A reasonable scope choice, but not a full
+  cosmetic pipeline.
 - **No gallery/preview screen.** Captures are written to the app cache and only a
   `file://` URI is returned; there's no review, retake, or save-to-gallery flow.
 
 **Bottom line:** the *engineering* is good — the real-time GPU pipeline, the
 threading model, and the WYSIWYG capture are done the way a native filter camera
-should be done. The *product* is a focused demo: single face, single platform,
-preview-resolution capture, and one beauty effect. It's a strong foundation, not
-a finished app.
+should be done. The *product* is a focused, cross-platform demo (Android verified,
+iOS unverified): multi-face, preview-resolution capture, and a blur+glow beauty
+effect. It's a strong foundation, not a finished app.
 
 ## Known limitations / next steps
 
-- Front/back camera orientation and mirroring math is written for a
-  portrait-locked app and needs a quick on-device sanity check (the usual
-  GL/camera gotcha); tune `BeautyRenderer.drawCameraToScene` if the preview is
-  rotated or flipped.
+- The preview rotation is portrait-tuned via `PREVIEW_ROTATION_OFFSET` in
+  `render/CameraPass.kt`; other sensors/orientations may need a different value.
+- iOS (`modules/beauty-filter/ios`) is written but not yet compiled — build it on
+  a Mac and work through `ios/README-ios.md` before shipping.
 - Captures come from the rendered preview (`glReadPixels` at view resolution),
   not the full-resolution sensor still.
 - No photo gallery/preview screen yet — capture saves a JPEG into the app

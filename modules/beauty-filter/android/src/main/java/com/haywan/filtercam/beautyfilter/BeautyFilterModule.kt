@@ -1,9 +1,18 @@
 package com.haywan.filtercam.beautyfilter
 
+import com.haywan.filtercam.beautyfilter.view.BeautyCameraView
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
+/**
+ * Expo module entry point. Declares the JS-facing contract:
+ *  - `isAvailable` / `applyBeauty` module functions, and
+ *  - the `BeautyFilter` view with its props and `takePicture` method.
+ *
+ * All rendering, camera and tracking work lives under the `view`, `render`,
+ * `tracking` and `gl` sub-packages; this file is only the wiring.
+ */
 class BeautyFilterModule : Module() {
     override fun definition() = ModuleDefinition {
         Name("BeautyFilter")
