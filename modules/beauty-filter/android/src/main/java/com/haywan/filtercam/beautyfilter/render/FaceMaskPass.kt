@@ -40,7 +40,9 @@ internal class FaceMaskPass {
         if (faces.isEmpty()) return
 
         for (face in faces) {
-            drawFan(face, FaceTopology.FACE_OVAL, 1f, 1f, viewport)
+            // Oval slightly deflated (0.93) so the mask stays off the hairline and
+            // jaw/beard edge, where smoothing would smear hair and look fake.
+            drawFan(face, FaceTopology.FACE_OVAL, 1f, 0.93f, viewport)
             drawFan(face, FaceTopology.LEFT_EYE, 0f, 1.6f, viewport)
             drawFan(face, FaceTopology.RIGHT_EYE, 0f, 1.6f, viewport)
             drawFan(face, FaceTopology.LEFT_BROW, 0f, 1.4f, viewport)

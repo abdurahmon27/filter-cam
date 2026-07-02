@@ -18,13 +18,13 @@ internal class CompositePass {
         scene: Framebuffer,
         blurred: Framebuffer,
         mask: Framebuffer,
-        strength: Float,
-        glow: Float,
+        target: Framebuffer,
+        adjust: BeautyAdjustments,
         viewport: Viewport,
         quad: ScreenQuad,
     ) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        GLES20.glViewport(0, 0, viewport.width, viewport.height)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer)
+        GLES20.glViewport(0, 0, target.width, target.height)
         GLES20.glUseProgram(program)
         quad.bind(program)
 
@@ -37,12 +37,10 @@ internal class CompositePass {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mask.texture)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uMask"), 2)
-        GLES20.glUniform1f(
-            GLES20.glGetUniformLocation(program, "uStrength"), strength.coerceIn(0f, 1f)
-        )
-        GLES20.glUniform1f(
-            GLES20.glGetUniformLocation(program, "uGlow"), glow.coerceIn(0f, 1f)
-        )
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uSmooth"), adjust.smooth)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uGlow"), adjust.glow)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uClarity"), adjust.clarity)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uWarmth"), adjust.warmth)
         quad.draw()
     }
 }

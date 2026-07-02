@@ -13,8 +13,16 @@ import type { ViewProps } from 'react-native';
 export type BeautyCameraViewProps = ViewProps & {
   /** Which camera to use. Defaults to 'front'. */
   facing?: 'front' | 'back';
-  /** Skin-smoothing strength, 0..1. 0 disables the beauty filter. */
+  /** Skin-smoothing strength, 0..1. 0 disables the smoothing. */
   smoothing?: number;
+  /** Brightness / radiant glow, 0..1 (skin-tone aware, never washes to white). */
+  glow?: number;
+  /** Even skin tone + redness reduction, 0..1. */
+  clarity?: number;
+  /** Warm tone, 0..1. */
+  warmth?: number;
+  /** Eye-enlarge amount, 0..1. */
+  eyeEnlarge?: number;
   /** Show the face-tracked mustache. */
   mustache?: boolean;
   /** Overlay every tracked landmark as a dot (debug / face-mesh view). */

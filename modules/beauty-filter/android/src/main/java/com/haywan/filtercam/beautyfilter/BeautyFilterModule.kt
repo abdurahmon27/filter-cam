@@ -35,6 +35,22 @@ class BeautyFilterModule : Module() {
                 view.setSmoothing(value ?: 0f)
             }
 
+            Prop("glow") { view, value: Float? ->
+                view.setGlow(value ?: 0f)
+            }
+
+            Prop("clarity") { view, value: Float? ->
+                view.setClarity(value ?: 0f)
+            }
+
+            Prop("warmth") { view, value: Float? ->
+                view.setWarmth(value ?: 0f)
+            }
+
+            Prop("eyeEnlarge") { view, value: Float? ->
+                view.setEyeEnlarge(value ?: 0f)
+            }
+
             Prop("mustache") { view, enabled: Boolean? ->
                 view.setMustache(enabled == true)
             }

@@ -1,6 +1,7 @@
 package com.haywan.filtercam.beautyfilter.render
 
 import android.opengl.GLES20
+import com.haywan.filtercam.beautyfilter.gl.Framebuffer
 import com.haywan.filtercam.beautyfilter.gl.GlUtils
 import com.haywan.filtercam.beautyfilter.gl.Shaders
 import java.nio.ByteBuffer
@@ -18,9 +19,9 @@ internal class FaceMeshPass {
     private val meshBuffer = ByteBuffer.allocateDirect(478 * 2 * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
-    fun draw(faces: Array<FloatArray>, viewport: Viewport) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        GLES20.glViewport(0, 0, viewport.width, viewport.height)
+    fun draw(faces: Array<FloatArray>, viewport: Viewport, target: Framebuffer) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer)
+        GLES20.glViewport(0, 0, target.width, target.height)
         GLES20.glUseProgram(program)
         val posLoc = GLES20.glGetAttribLocation(program, "aPos")
         GLES20.glEnableVertexAttribArray(posLoc)

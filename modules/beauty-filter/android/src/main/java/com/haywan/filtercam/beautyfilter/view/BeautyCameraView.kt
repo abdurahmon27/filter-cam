@@ -95,6 +95,32 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         renderer.smoothing = value.coerceIn(0f, 1f)
     }
 
+    fun setGlow(value: Float) {
+        renderer.glow = value.coerceIn(0f, 1f)
+    }
+
+    fun setClarity(value: Float) {
+        renderer.clarity = value.coerceIn(0f, 1f)
+    }
+
+    fun setWarmth(value: Float) {
+        renderer.warmth = value.coerceIn(0f, 1f)
+    }
+
+    fun setEyeEnlarge(value: Float) {
+        renderer.eyeEnlarge = value.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Attach a target surface (e.g. from a WebRTC SurfaceTextureHelper) to
+     * receive every filtered frame GPU-side, or null to detach. This is the seam
+     * a LiveKit custom video capturer uses to publish the filtered stream.
+     * See docs/STREAMING.md.
+     */
+    fun setStreamSurface(surface: android.view.Surface?) {
+        renderer.setStreamSurface(surface)
+    }
+
     fun setMustache(enabled: Boolean) {
         renderer.mustacheEnabled = enabled
     }

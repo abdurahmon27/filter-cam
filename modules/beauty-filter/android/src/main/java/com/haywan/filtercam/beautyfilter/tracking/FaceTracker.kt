@@ -135,7 +135,9 @@ internal class FaceTracker(
     companion object {
         private const val TAG = "FaceTracker"
         private const val MODEL_ASSET = "face_landmarker.task"
-        private const val SMOOTHING_ALPHA = 0.55f
+        // Higher alpha = the mask/mustache follow the face faster (less lag).
+        // 0.8 keeps enough smoothing to avoid jitter without trailing the face.
+        private const val SMOOTHING_ALPHA = 0.8f
         private const val MAX_FACES = 5
     }
 }

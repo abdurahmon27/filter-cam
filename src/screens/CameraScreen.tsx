@@ -6,13 +6,9 @@ import {
   Text,
   View,
 } from 'react-native';
-import {
-  CameraType,
-  CameraView,
-  useCameraPermissions,
-} from 'expo-camera';
+import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { BlurView } from 'expo-blur';
-import FilterBar, { FilterId } from '../components/FilterBar';
+import FilterCarousel from '../components/FilterCarousel';
 import BeautyOverlay from '../components/BeautyOverlay';
 import MustacheOverlay from '../components/MustacheOverlay';
 import {
@@ -20,30 +16,31 @@ import {
   BeautyCameraViewRef,
   isBeautyCameraAvailable,
 } from '../../modules/beauty-filter';
+import { DEFAULT_INTENSITIES, FilterId, theme } from '../theme';
 
 type Props = {
   onClose: () => void;
 };
 
-const BEAUTY_STRENGTH = 0.85;
+const NO_INTENSITIES: Record<FilterId, number> = {
+  smooth: 0,
+  glow: 0,
+  clarity: 0,
+  warm: 0,
+  eyes: 0,
+};
 
 export default function CameraScreen({ onClose }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('front');
-  const [filters, setFilters] = useState<Record<FilterId, boolean>>({
-    beauty: true,
-    mustache: false,
-  });
+  const [intensities, setIntensities] =
+    useState<Record<FilterId, number>>(DEFAULT_INTENSITIES);
+  const [mustache, setMustache] = useState(false);
   const [faceMesh, setFaceMesh] = useState(false);
-  const cameraRef = useRef<CameraView>(null);
   const nativeCameraRef = useRef<BeautyCameraViewRef>(null);
 
-  // In a dev/EAS build the Kotlin module renders the camera itself:
-  // MediaPipe face mesh + GL beauty filter + tracked mustache.
   const useNativeCamera = isBeautyCameraAvailable && BeautyCameraView != null;
-
-  const toggle = (id: FilterId) =>
-    setFilters((prev) => ({ ...prev, [id]: !prev[id] }));
+  const beautyActive = Object.values(intensities).some((v) => v > 0.01);
 
   if (!permission) {
     return (
@@ -56,13 +53,14 @@ export default function CameraScreen({ onClose }: Props) {
   if (!permission.granted) {
     return (
       <View style={styles.center}>
+        <Text style={styles.permEmoji}>📷</Text>
         <Text style={styles.permText}>
           FilterCam needs camera access to show your filters.
         </Text>
         <Pressable style={styles.permButton} onPress={requestPermission}>
           <Text style={styles.permButtonText}>Grant access</Text>
         </Pressable>
-        <Pressable onPress={onClose}>
+        <Pressable onPress={onClose} hitSlop={12}>
           <Text style={styles.link}>Go back</Text>
         </Pressable>
       </View>
@@ -71,74 +69,70 @@ export default function CameraScreen({ onClose }: Props) {
 
   return (
     <View style={styles.container}>
-      {/* Camera fills the entire screen. */}
       {useNativeCamera && BeautyCameraView ? (
         <BeautyCameraView
           ref={nativeCameraRef}
           style={StyleSheet.absoluteFill}
           facing={facing}
-          smoothing={filters.beauty ? BEAUTY_STRENGTH : 0}
-          mustache={filters.mustache}
+          smoothing={intensities.smooth}
+          glow={intensities.glow}
+          clarity={intensities.clarity}
+          warmth={intensities.warm}
+          eyeEnlarge={intensities.eyes}
+          mustache={mustache}
           faceMesh={faceMesh}
         />
       ) : (
         <>
-          <CameraView
-            ref={cameraRef}
-            style={StyleSheet.absoluteFill}
-            facing={facing}
-          />
-          {filters.beauty && <BeautyOverlay />}
-          {filters.mustache && <MustacheOverlay />}
+          <CameraView style={StyleSheet.absoluteFill} facing={facing} />
+          {beautyActive && <BeautyOverlay />}
+          {mustache && <MustacheOverlay />}
         </>
       )}
 
-      {/* Top glass buttons floating over the camera. */}
+      {/* Top glass controls */}
       <View style={styles.topBar} pointerEvents="box-none">
-        <BlurView intensity={30} tint="dark" style={styles.glassCircle}>
-          <Pressable style={styles.circlePress} onPress={onClose}>
-            <Text style={styles.iconText}>✕</Text>
-          </Pressable>
-        </BlurView>
-        <BlurView intensity={30} tint="dark" style={styles.glassCircle}>
-          <Pressable
-            style={styles.circlePress}
-            onPress={() =>
-              setFacing((f) => (f === 'front' ? 'back' : 'front'))
-            }
-          >
-            <Text style={styles.iconText}>⟲</Text>
-          </Pressable>
-        </BlurView>
+        <GlassButton icon="✕" onPress={onClose} />
+        <View style={styles.brandPill}>
+          <Text style={styles.brandText}>FilterCam</Text>
+        </View>
+        <GlassButton
+          icon="⟲"
+          onPress={() => setFacing((f) => (f === 'front' ? 'back' : 'front'))}
+        />
       </View>
 
-      {/* Bottom glass control panel floating over the camera. */}
-      <BlurView intensity={45} tint="dark" style={styles.bottomPanel}>
-        <FilterBar active={filters} onToggle={toggle} />
-        <View style={styles.shutterRow}>
-          <Pressable
-            style={({ pressed }) => [
-              styles.meshToggle,
-              faceMesh && styles.meshToggleActive,
-              pressed && styles.shutterPressed,
-            ]}
-            onPress={() => setFaceMesh((on) => !on)}
-          >
-            <Text style={styles.meshEmoji}>{faceMesh ? '🟢' : '⚪️'}</Text>
-            <Text style={[styles.meshLabel, faceMesh && styles.meshLabelActive]}>
-              {faceMesh ? 'Face mesh on' : 'Face mesh off'}
-            </Text>
-          </Pressable>
-        </View>
-      </BlurView>
+      {/* Bottom filter tray */}
+      <FilterCarousel
+        intensities={intensities}
+        onIntensity={(id, v) =>
+          setIntensities((prev) => ({ ...prev, [id]: v }))
+        }
+        mustache={mustache}
+        onToggleMustache={() => setMustache((m) => !m)}
+        faceMesh={faceMesh}
+        onToggleFaceMesh={() => setFaceMesh((m) => !m)}
+        onReset={() => setIntensities(NO_INTENSITIES)}
+      />
     </View>
+  );
+}
+
+function GlassButton({ icon, onPress }: { icon: string; onPress: () => void }) {
+  return (
+    <BlurView intensity={30} tint="dark" style={styles.glassBtn}>
+      <Pressable style={styles.glassBtnPress} onPress={onPress} hitSlop={8}>
+        <Text style={styles.glassBtnIcon}>{icon}</Text>
+      </Pressable>
+    </BlurView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0b0b0f',
+    backgroundColor: '#000',
+    justifyContent: 'space-between',
   },
   center: {
     flex: 1,
@@ -146,99 +140,72 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 32,
     gap: 16,
+    backgroundColor: theme.color.bg,
   },
   topBar: {
     position: 'absolute',
-    top: 0,
+    top: 52,
     left: 0,
     right: 0,
-    paddingTop: 52,
-    paddingHorizontal: 16,
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
+    paddingHorizontal: 16,
   },
-  glassCircle: {
+  brandPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: theme.radius.pill,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  brandText: {
+    color: '#fff',
+    fontSize: theme.font.label,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  glassBtn: {
     width: 46,
     height: 46,
     borderRadius: 23,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.25)',
+    borderColor: theme.color.glassBorder,
   },
-  circlePress: {
+  glassBtnPress: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  iconText: {
+  glassBtnIcon: {
     color: '#fff',
-    fontSize: 20,
+    fontSize: 19,
     fontWeight: '700',
   },
-  bottomPanel: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: 14,
-    paddingBottom: 34,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    overflow: 'hidden',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.18)',
-  },
-  shutterRow: {
-    alignItems: 'center',
-    paddingTop: 4,
-  },
-  shutterPressed: {
-    opacity: 0.8,
-  },
-  meshToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 26,
-    paddingVertical: 16,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  meshToggleActive: {
-    backgroundColor: 'rgba(21,255,140,0.18)',
-    borderColor: '#15ff8c',
-  },
-  meshEmoji: {
-    fontSize: 20,
-  },
-  meshLabel: {
-    color: '#c7ccd4',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  meshLabelActive: {
-    color: '#eafff4',
+  permEmoji: {
+    fontSize: 56,
+    marginBottom: 4,
   },
   permText: {
-    color: '#e6e6ea',
-    fontSize: 16,
+    color: theme.color.text,
+    fontSize: theme.font.body,
     textAlign: 'center',
+    lineHeight: 22,
   },
   permButton: {
-    backgroundColor: '#ff375f',
+    backgroundColor: theme.color.accent,
     paddingHorizontal: 28,
     paddingVertical: 14,
-    borderRadius: 999,
+    borderRadius: theme.radius.pill,
+    marginTop: 4,
   },
   permButtonText: {
     color: '#fff',
     fontWeight: '700',
-    fontSize: 16,
+    fontSize: theme.font.body,
   },
   link: {
-    color: '#9aa0aa',
-    fontSize: 15,
+    color: theme.color.textMuted,
+    fontSize: theme.font.body,
   },
 });

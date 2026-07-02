@@ -32,7 +32,13 @@ internal class BeautyRenderer(
 ) : GLSurfaceView.Renderer {
 
     // ---- state pushed from the outside (main thread / analyzer thread) ----
-    @Volatile var smoothing = 0.6f
+    // Each beauty parameter is an independent "filter" (0..1). Conservative
+    // defaults keep the effect natural until the UI dials them up.
+    @Volatile var smoothing = 0.5f
+    @Volatile var glow = 0.3f
+    @Volatile var clarity = 0.4f
+    @Volatile var warmth = 0.15f
+    @Volatile var eyeEnlarge = 0f
     @Volatile var mustacheEnabled = false
     @Volatile var faceMeshEnabled = false
     @Volatile var faces: Array<FloatArray> = emptyArray() // per face: 478 * 2 normalized, display-oriented
@@ -56,14 +62,32 @@ internal class BeautyRenderer(
     private lateinit var blurPass: BlurPass
     private lateinit var maskPass: FaceMaskPass
     private lateinit var compositePass: CompositePass
+    private lateinit var eyeWarpPass: EyeWarpPass
     private lateinit var mustachePass: MustachePass
     private lateinit var meshPass: FaceMeshPass
+    private lateinit var blitPass: BlitPass
 
     private var sceneFbo: Framebuffer? = null
+    private var beautyFbo: Framebuffer? = null
+    private var finalFbo: Framebuffer? = null
     private var blurA: Framebuffer? = null
     private var blurB: Framebuffer? = null
     private var maskA: Framebuffer? = null
     private var maskB: Framebuffer? = null
+
+    // ---- streaming output (GPU-resident; see StreamOutput / docs/STREAMING.md) ----
+    @Volatile private var pendingStreamSurface: android.view.Surface? = null
+    @Volatile private var clearStream = false
+    private var streamOutput: StreamOutput? = null
+
+    /**
+     * Push a target [android.view.Surface] (e.g. from a WebRTC SurfaceTextureHelper)
+     * to receive every rendered frame, or null to stop. Safe to call from any
+     * thread; applied on the GL thread next frame.
+     */
+    fun setStreamSurface(surface: android.view.Surface?) {
+        if (surface == null) clearStream = true else pendingStreamSurface = surface
+    }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         oesTexture = GlUtils.createExternalTexture()
@@ -73,8 +97,10 @@ internal class BeautyRenderer(
         blurPass = BlurPass()
         maskPass = FaceMaskPass()
         compositePass = CompositePass()
+        eyeWarpPass = EyeWarpPass()
         mustachePass = MustachePass().apply { setup() }
         meshPass = FaceMeshPass()
+        blitPass = BlitPass()
 
         surfaceTexture?.let(onSurfaceTextureReady)
     }
@@ -83,6 +109,8 @@ internal class BeautyRenderer(
         viewport.setSize(width, height)
         releaseFbos()
         sceneFbo = Framebuffer(viewport.width, viewport.height)
+        beautyFbo = Framebuffer(viewport.width, viewport.height)
+        finalFbo = Framebuffer(viewport.width, viewport.height)
         val bw = (viewport.width / 4).coerceAtLeast(1)
         val bh = (viewport.height / 4).coerceAtLeast(1)
         blurA = Framebuffer(bw, bh)
@@ -98,6 +126,8 @@ internal class BeautyRenderer(
         viewport.updateCrop(cameraRotationDegrees, cameraBufferWidth, cameraBufferHeight)
 
         val scene = sceneFbo ?: return
+        val beauty = beautyFbo ?: return
+        val finalImage = finalFbo ?: return
         val bA = blurA ?: return
         val bB = blurB ?: return
         val mA = maskA ?: return
@@ -105,17 +135,47 @@ internal class BeautyRenderer(
 
         val faceFresh = SystemClock.uptimeMillis() - facesAt < 400
         val lms = if (faceFresh) faces else emptyArray()
+        val adjust = BeautyAdjustments.of(smoothing, glow, clarity, warmth, eyeEnlarge)
 
+        // --- build the final filtered image into finalFbo ---
         cameraPass.draw(oesTexture, surfaceTexMatrix, cameraRotationDegrees, viewport, scene, quad)
         blurPass.blurBoth(scene.texture, bA, bB, quad)
         maskPass.draw(lms, viewport, mA, mB, blurPass, quad)
-        compositePass.draw(scene, bB, mA, smoothing, glow = smoothing, viewport = viewport, quad = quad)
+        compositePass.draw(scene, bB, mA, beauty, adjust, viewport, quad)
+        // eye-warp blits beauty -> finalFbo (plain blit when eyeEnlarge = 0);
+        // mustache/mesh then draw on top of finalFbo (the bound target).
+        eyeWarpPass.draw(beauty, finalImage, lms, adjust.eyeEnlarge, viewport, quad)
         if (mustacheEnabled && lms.isNotEmpty()) mustachePass.draw(lms, viewport)
-        if (faceMeshEnabled && lms.isNotEmpty()) meshPass.draw(lms, viewport)
+        if (faceMeshEnabled && lms.isNotEmpty()) meshPass.draw(lms, viewport, finalImage)
+
+        // --- present: to the screen, and to the stream surface if attached ---
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, viewport.width, viewport.height)
+        blitPass.draw(finalImage.texture, quad)
+
+        updateStreamOutput()
+        streamOutput?.present(
+            finalImage.texture, viewport.width, viewport.height,
+            SystemClock.elapsedRealtimeNanos(), blitPass, quad
+        )
 
         pendingCapture?.let { callback ->
             pendingCapture = null
             callback(readPixels())
+        }
+    }
+
+    /** Applies a pending stream-surface change on the GL thread. */
+    private fun updateStreamOutput() {
+        if (clearStream) {
+            streamOutput?.release()
+            streamOutput = null
+            clearStream = false
+        }
+        pendingStreamSurface?.let { surface ->
+            streamOutput?.release()
+            streamOutput = StreamOutput(surface)
+            pendingStreamSurface = null
         }
     }
 
@@ -146,6 +206,8 @@ internal class BeautyRenderer(
 
     private fun releaseFbos() {
         sceneFbo?.release(); sceneFbo = null
+        beautyFbo?.release(); beautyFbo = null
+        finalFbo?.release(); finalFbo = null
         blurA?.release(); blurA = null
         blurB?.release(); blurB = null
         maskA?.release(); maskA = null
