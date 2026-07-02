@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import FilterCarousel from '../components/FilterCarousel';
 import BeautyOverlay from '../components/BeautyOverlay';
 import MustacheOverlay from '../components/MustacheOverlay';
@@ -31,6 +32,7 @@ const NO_INTENSITIES: Record<FilterId, number> = {
 };
 
 export default function CameraScreen({ onClose }: Props) {
+  const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('front');
   const [intensities, setIntensities] =
@@ -91,7 +93,10 @@ export default function CameraScreen({ onClose }: Props) {
       )}
 
       {/* Top glass controls */}
-      <View style={styles.topBar} pointerEvents="box-none">
+      <View
+        style={[styles.topBar, { top: insets.top + 10 }]}
+        pointerEvents="box-none"
+      >
         <GlassButton icon="✕" onPress={onClose} />
         <View style={styles.brandPill}>
           <Text style={styles.brandText}>FilterCam</Text>
@@ -113,6 +118,7 @@ export default function CameraScreen({ onClose }: Props) {
         faceMesh={faceMesh}
         onToggleFaceMesh={() => setFaceMesh((m) => !m)}
         onReset={() => setIntensities(NO_INTENSITIES)}
+        bottomInset={insets.bottom}
       />
     </View>
   );

@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '../theme';
 
 type Props = {
@@ -13,8 +14,14 @@ const HIGHLIGHTS = [
 ];
 
 export default function HomeScreen({ onOpenCamera }: Props) {
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.container}>
+    <View
+      style={[
+        styles.container,
+        { paddingTop: 90 + insets.top, paddingBottom: 28 + insets.bottom },
+      ]}
+    >
       <View style={styles.hero}>
         <View style={styles.badge}>
           <Text style={styles.badgeEmoji}>🥸</Text>
@@ -53,8 +60,6 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.bg,
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 130,
-    paddingBottom: 56,
   },
   hero: {
     alignItems: 'center',

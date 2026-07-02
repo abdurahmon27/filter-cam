@@ -113,7 +113,15 @@ internal class FaceTracker(
                     if (p.size != n.size) {
                         n
                     } else {
-                        FloatArray(n.size) { i -> p[i] + (n[i] - p[i]) * SMOOTHING_ALPHA }
+                        // Velocity-adaptive smoothing: when a point moves fast the
+                        // blend weight approaches 1 (follows the face with almost no
+                        // lag); when it is nearly still it stays low (no jitter).
+                        FloatArray(n.size) { i ->
+                            val d = n[i] - p[i]
+                            val a = (SMOOTHING_BASE + kotlin.math.abs(d) * SMOOTHING_ADAPT)
+                                .coerceAtMost(1f)
+                            p[i] + d * a
+                        }
                     }
                 }
             }
@@ -135,9 +143,11 @@ internal class FaceTracker(
     companion object {
         private const val TAG = "FaceTracker"
         private const val MODEL_ASSET = "face_landmarker.task"
-        // Higher alpha = the mask/mustache follow the face faster (less lag).
-        // 0.8 keeps enough smoothing to avoid jitter without trailing the face.
-        private const val SMOOTHING_ALPHA = 0.8f
+        // Velocity-adaptive smoothing weights: effective alpha =
+        // BASE + |delta| * ADAPT, clamped to 1. Low base keeps a still face
+        // jitter-free; the ADAPT term makes a moving face snap to real-time.
+        private const val SMOOTHING_BASE = 0.5f
+        private const val SMOOTHING_ADAPT = 14f
         private const val MAX_FACES = 5
     }
 }

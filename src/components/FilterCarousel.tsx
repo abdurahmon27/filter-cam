@@ -19,6 +19,8 @@ type Props = {
   faceMesh: boolean;
   onToggleFaceMesh: () => void;
   onReset: () => void;
+  /** Safe-area bottom inset (Android nav bar / iOS home indicator). */
+  bottomInset?: number;
 };
 
 /** A single round selector button (icon + label) with active/selected states. */
@@ -73,6 +75,7 @@ export default function FilterCarousel({
   faceMesh,
   onToggleFaceMesh,
   onReset,
+  bottomInset = 0,
 }: Props) {
   const [selected, setSelected] = useState<FilterId>('smooth');
   const fade = useRef(new Animated.Value(1)).current;
@@ -91,7 +94,11 @@ export default function FilterCarousel({
   const value = intensities[selected];
 
   return (
-    <BlurView intensity={40} tint="dark" style={styles.panel}>
+    <BlurView
+      intensity={40}
+      tint="dark"
+      style={[styles.panel, { paddingBottom: 18 + bottomInset }]}
+    >
       {/* Intensity row for the selected beauty filter */}
       <Animated.View style={[styles.sliderRow, { opacity: fade }]}>
         <View style={styles.sliderHeader}>
@@ -146,6 +153,10 @@ export default function FilterCarousel({
 
 const styles = StyleSheet.create({
   panel: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
     borderTopLeftRadius: theme.radius.lg,
     borderTopRightRadius: theme.radius.lg,
     overflow: 'hidden',
