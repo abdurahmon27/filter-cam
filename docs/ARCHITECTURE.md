@@ -137,19 +137,19 @@ fields.
 
 ```mermaid
 sequenceDiagram
-    participant Cam as CameraX ImageAnalysis<br/>(analysis executor)
+    participant Cam as CameraX ImageAnalysis (analysis executor)
     participant FT as FaceTracker
-    participant MP as MediaPipe FaceLandmarker<br/>(GPU, CPU fallback)
-    participant R as BeautyRenderer<br/>(GL thread)
+    participant MP as MediaPipe FaceLandmarker (GPU, CPU fallback)
+    participant R as BeautyRenderer (GL thread)
 
-    Cam->>FT: analyze(ImageProxy) — RGBA, KEEP_ONLY_LATEST
+    Cam->>FT: analyze(ImageProxy) - RGBA, KEEP_ONLY_LATEST
     FT->>FT: rotate upright + mirror if front camera
     FT->>MP: detectAsync(bitmap, timestamp)
-    Note over Cam,FT: proxy.close() → next frame can arrive
-    MP-->>FT: onResult(478 landmarks) [async]
-    FT->>FT: exponential smoothing (α=0.55)<br/>reset if gap &gt; 300 ms
-    FT->>R: renderer.landmarks = smoothed<br/>renderer.landmarksAt = now
-    R->>R: next onDrawFrame uses landmarks<br/>(if fresher than 400 ms)
+    Note over Cam,FT: proxy.close() then next frame can arrive
+    MP-->>FT: onResult(478 landmarks), async
+    FT->>FT: exponential smoothing (alpha=0.55), reset if gap over 300 ms
+    FT->>R: set renderer.landmarks = smoothed, landmarksAt = now
+    R->>R: next onDrawFrame uses landmarks (if fresher than 400 ms)
 ```
 
 Details worth knowing:
