@@ -30,6 +30,10 @@ class BeautyFilterModule : Module() {
                 view.setMustache(enabled == true)
             }
 
+            Prop("faceMesh") { view, enabled: Boolean? ->
+                view.setFaceMesh(enabled == true)
+            }
+
             AsyncFunction("takePicture") { view: BeautyCameraView, promise: Promise ->
                 view.takePicture(promise)
             }

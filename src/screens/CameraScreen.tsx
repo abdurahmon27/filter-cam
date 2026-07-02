@@ -11,6 +11,7 @@ import {
   CameraView,
   useCameraPermissions,
 } from 'expo-camera';
+import { BlurView } from 'expo-blur';
 import FilterBar, { FilterId } from '../components/FilterBar';
 import BeautyOverlay from '../components/BeautyOverlay';
 import MustacheOverlay from '../components/MustacheOverlay';
@@ -33,7 +34,7 @@ export default function CameraScreen({ onClose }: Props) {
     beauty: true,
     mustache: false,
   });
-  const [busy, setBusy] = useState(false);
+  const [faceMesh, setFaceMesh] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const nativeCameraRef = useRef<BeautyCameraViewRef>(null);
 
@@ -68,75 +69,68 @@ export default function CameraScreen({ onClose }: Props) {
     );
   }
 
-  const capture = async () => {
-    if (busy) return;
-    try {
-      setBusy(true);
-      if (useNativeCamera) {
-        // The native capture already includes the beauty filter and mustache.
-        await nativeCameraRef.current?.takePicture();
-      } else {
-        await cameraRef.current?.takePictureAsync();
-      }
-      // A gallery/preview screen can be added here later.
-    } catch (e) {
-      console.warn('capture failed', e);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <View style={styles.container}>
-      <View style={styles.cameraWrap}>
-        {useNativeCamera && BeautyCameraView ? (
-          <BeautyCameraView
-            ref={nativeCameraRef}
+      {/* Camera fills the entire screen. */}
+      {useNativeCamera && BeautyCameraView ? (
+        <BeautyCameraView
+          ref={nativeCameraRef}
+          style={StyleSheet.absoluteFill}
+          facing={facing}
+          smoothing={filters.beauty ? BEAUTY_STRENGTH : 0}
+          mustache={filters.mustache}
+          faceMesh={faceMesh}
+        />
+      ) : (
+        <>
+          <CameraView
+            ref={cameraRef}
             style={StyleSheet.absoluteFill}
             facing={facing}
-            smoothing={filters.beauty ? BEAUTY_STRENGTH : 0}
-            mustache={filters.mustache}
           />
-        ) : (
-          <>
-            <CameraView
-              ref={cameraRef}
-              style={StyleSheet.absoluteFill}
-              facing={facing}
-            />
-            {filters.beauty && <BeautyOverlay />}
-            {filters.mustache && <MustacheOverlay />}
-          </>
-        )}
+          {filters.beauty && <BeautyOverlay />}
+          {filters.mustache && <MustacheOverlay />}
+        </>
+      )}
 
-        <Pressable style={styles.closeBtn} onPress={onClose}>
-          <Text style={styles.closeText}>✕</Text>
-        </Pressable>
-        <Pressable
-          style={styles.flipBtn}
-          onPress={() =>
-            setFacing((f) => (f === 'front' ? 'back' : 'front'))
-          }
-        >
-          <Text style={styles.flipText}>⟲</Text>
-        </Pressable>
+      {/* Top glass buttons floating over the camera. */}
+      <View style={styles.topBar} pointerEvents="box-none">
+        <BlurView intensity={30} tint="dark" style={styles.glassCircle}>
+          <Pressable style={styles.circlePress} onPress={onClose}>
+            <Text style={styles.iconText}>✕</Text>
+          </Pressable>
+        </BlurView>
+        <BlurView intensity={30} tint="dark" style={styles.glassCircle}>
+          <Pressable
+            style={styles.circlePress}
+            onPress={() =>
+              setFacing((f) => (f === 'front' ? 'back' : 'front'))
+            }
+          >
+            <Text style={styles.iconText}>⟲</Text>
+          </Pressable>
+        </BlurView>
       </View>
 
-      <View style={styles.controls}>
+      {/* Bottom glass control panel floating over the camera. */}
+      <BlurView intensity={45} tint="dark" style={styles.bottomPanel}>
         <FilterBar active={filters} onToggle={toggle} />
         <View style={styles.shutterRow}>
           <Pressable
-            style={({ pressed }) => [styles.shutter, pressed && styles.shutterPressed]}
-            onPress={capture}
+            style={({ pressed }) => [
+              styles.meshToggle,
+              faceMesh && styles.meshToggleActive,
+              pressed && styles.shutterPressed,
+            ]}
+            onPress={() => setFaceMesh((on) => !on)}
           >
-            {busy ? (
-              <ActivityIndicator color="#0b0b0f" />
-            ) : (
-              <View style={styles.shutterInner} />
-            )}
+            <Text style={styles.meshEmoji}>{faceMesh ? '🟢' : '⚪️'}</Text>
+            <Text style={[styles.meshLabel, faceMesh && styles.meshLabelActive]}>
+              {faceMesh ? 'Face mesh on' : 'Face mesh off'}
+            </Text>
           </Pressable>
         </View>
-      </View>
+      </BlurView>
     </View>
   );
 }
@@ -153,72 +147,79 @@ const styles = StyleSheet.create({
     padding: 32,
     gap: 16,
   },
-  cameraWrap: {
-    flex: 1,
+  topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: 52,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  glassCircle: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     overflow: 'hidden',
-    borderBottomLeftRadius: 24,
-    borderBottomRightRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.25)',
   },
-  controls: {
-    backgroundColor: '#0b0b0f',
-    paddingBottom: 12,
-  },
-  closeBtn: {
-    position: 'absolute',
-    top: 16,
-    left: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.4)',
+  circlePress: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  closeText: {
+  iconText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '700',
   },
-  flipBtn: {
+  bottomPanel: {
     position: 'absolute',
-    top: 16,
-    right: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  flipText: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '700',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: 14,
+    paddingBottom: 34,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    overflow: 'hidden',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
   },
   shutterRow: {
     alignItems: 'center',
     paddingTop: 4,
   },
-  shutter: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 4,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
   shutterPressed: {
     opacity: 0.8,
   },
-  shutterInner: {
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    backgroundColor: '#fff',
+  meshToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 26,
+    paddingVertical: 16,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.12)',
     borderWidth: 2,
-    borderColor: '#0b0b0f',
+    borderColor: 'transparent',
+  },
+  meshToggleActive: {
+    backgroundColor: 'rgba(21,255,140,0.18)',
+    borderColor: '#15ff8c',
+  },
+  meshEmoji: {
+    fontSize: 20,
+  },
+  meshLabel: {
+    color: '#c7ccd4',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  meshLabelActive: {
+    color: '#eafff4',
   },
   permText: {
     color: '#e6e6ea',

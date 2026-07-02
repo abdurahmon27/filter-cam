@@ -84,6 +84,10 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         renderer.mustacheEnabled = enabled
     }
 
+    fun setFaceMesh(enabled: Boolean) {
+        renderer.faceMeshEnabled = enabled
+    }
+
     fun takePicture(promise: Promise) {
         renderer.captureNextFrame { bitmap ->
             ioExecutor.execute { saveBitmap(bitmap, promise) }
@@ -150,12 +154,16 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
                 analysis.setAnalyzer(analysisExecutor) { proxy ->
+                    // Single source of truth for orientation: the camera texture
+                    // and the face landmarks must use the SAME rotation, otherwise
+                    // the preview and the filters disagree (video sideways while
+                    // filters stay upright). imageInfo.rotationDegrees is what the
+                    // FaceTracker already uses, so drive the renderer from it too.
+                    renderer.cameraRotationDegrees = proxy.imageInfo.rotationDegrees
                     tracker?.analyze(proxy) ?: proxy.close()
                 }
 
-                val camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
-                renderer.cameraRotationDegrees =
-                    camera.cameraInfo.getSensorRotationDegrees(Surface.ROTATION_0)
+                provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera bind failed", t)
             }

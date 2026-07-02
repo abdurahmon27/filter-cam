@@ -16,6 +16,8 @@ export type BeautyCameraViewProps = ViewProps & {
   smoothing?: number;
   /** Show the face-tracked mustache. */
   mustache?: boolean;
+  /** Overlay every tracked landmark as a dot (debug / face-mesh view). */
+  faceMesh?: boolean;
 };
 
 export type BeautyCameraViewRef = {

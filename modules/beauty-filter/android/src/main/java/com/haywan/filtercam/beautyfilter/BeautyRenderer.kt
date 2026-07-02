@@ -35,6 +35,7 @@ class BeautyRenderer(
     // ---- state pushed from the outside (main thread / analyzer thread) ----
     @Volatile var smoothing = 0.6f
     @Volatile var mustacheEnabled = false
+    @Volatile var faceMeshEnabled = false
     @Volatile var landmarks: FloatArray? = null // 478 * 2, normalized, display-oriented
     @Volatile var landmarksAt = 0L
     @Volatile var cameraRotationDegrees = 90
@@ -55,6 +56,7 @@ class BeautyRenderer(
     private var solidProgram = 0
     private var compositeProgram = 0
     private var spriteProgram = 0
+    private var pointProgram = 0
 
     private var sceneFbo: Fbo? = null
     private var blurA: Fbo? = null
@@ -78,6 +80,9 @@ class BeautyRenderer(
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
     private val spriteBuffer = ByteBuffer.allocateDirect(4 * 4 * 4)
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
+    // All 478 landmarks as NDC points for the debug face-mesh overlay.
+    private val meshBuffer = ByteBuffer.allocateDirect(478 * 2 * 4)
+        .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     // crop of the upright camera frame that is visible on screen
     private var cropScaleX = 1f
@@ -95,6 +100,7 @@ class BeautyRenderer(
         solidProgram = GlUtils.buildProgram(SOLID_VS, SOLID_FS)
         compositeProgram = GlUtils.buildProgram(PASS_VS, COMPOSITE_FS)
         spriteProgram = GlUtils.buildProgram(SPRITE_VS, SPRITE_FS)
+        pointProgram = GlUtils.buildProgram(POINT_VS, POINT_FS)
 
         surfaceTexture?.let(onSurfaceTextureReady)
     }
@@ -132,6 +138,7 @@ class BeautyRenderer(
         drawFaceMask(lms, mA, mB)
         composite(scene, bB, mA)
         if (mustacheEnabled && lms != null) drawMustache(lms)
+        if (faceMeshEnabled && lms != null) drawFaceMesh(lms)
 
         pendingCapture?.let { callback ->
             pendingCapture = null
@@ -158,6 +165,8 @@ class BeautyRenderer(
             cropScaleX = 1f; cropScaleY = 1f; cropOffX = 0f; cropOffY = 0f
             return
         }
+        // Crop aspect follows the landmark/display orientation (the source of
+        // truth), independent of the preview texture's rotation offset.
         val rotated = cameraRotationDegrees % 180 != 0
         val uprightW = if (rotated) bh else bw
         val uprightH = if (rotated) bw else bh
@@ -179,7 +188,7 @@ class BeautyRenderer(
         // upright, then apply the SurfaceTexture matrix.
         Matrix.setIdentityM(rotMatrix, 0)
         Matrix.translateM(rotMatrix, 0, 0.5f, 0.5f, 0f)
-        Matrix.rotateM(rotMatrix, 0, -cameraRotationDegrees.toFloat(), 0f, 0f, 1f)
+        Matrix.rotateM(rotMatrix, 0, -(cameraRotationDegrees + PREVIEW_ROTATION_OFFSET).toFloat(), 0f, 0f, 1f)
         Matrix.translateM(rotMatrix, 0, -0.5f, -0.5f, 0f)
         Matrix.multiplyMM(combinedMatrix, 0, texMatrix, 0, rotMatrix, 0)
 
@@ -345,6 +354,35 @@ class BeautyRenderer(
         GLES20.glDisable(GLES20.GL_BLEND)
     }
 
+    /** Debug overlay: every landmark drawn as a round dot, in the same space as
+     *  the mustache/beauty mask (so it reveals how landmarks line up with them). */
+    private fun drawFaceMesh(lms: FloatArray) {
+        val count = lms.size / 2
+        meshBuffer.clear()
+        for (i in 0 until count) {
+            meshBuffer.put(toNdcX(lms[i * 2])).put(toNdcY(lms[i * 2 + 1]))
+        }
+        meshBuffer.position(0)
+
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, viewWidth, viewHeight)
+        GLES20.glUseProgram(pointProgram)
+        val posLoc = GLES20.glGetAttribLocation(pointProgram, "aPos")
+        GLES20.glEnableVertexAttribArray(posLoc)
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, meshBuffer)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(pointProgram, "uPointSize"),
+            (viewWidth * 0.012f).coerceAtLeast(4f)
+        )
+        GLES20.glUniform4f(
+            GLES20.glGetUniformLocation(pointProgram, "uColor"), 0.15f, 1f, 0.55f, 1f
+        )
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, count)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
     private fun readPixels(): Bitmap {
         val buffer = ByteBuffer.allocateDirect(viewWidth * viewHeight * 4)
             .order(ByteOrder.nativeOrder())
@@ -391,6 +429,11 @@ class BeautyRenderer(
     }
 
     companion object {
+        // Extra rotation applied to the camera preview texture so it matches the
+        // upright landmark space. Determined empirically for the front sensor +
+        // SurfaceTexture transform on this pipeline.
+        private const val PREVIEW_ROTATION_OFFSET = 90
+
         private const val CAMERA_VS = """
             attribute vec2 aPos;
             attribute vec2 aUV;
@@ -472,6 +515,26 @@ class BeautyRenderer(
             varying vec2 vUV;
             uniform sampler2D uTex;
             void main() { gl_FragColor = texture2D(uTex, vUV); }
+        """
+
+        private const val POINT_VS = """
+            attribute vec2 aPos;
+            uniform float uPointSize;
+            void main() {
+                gl_Position = vec4(aPos, 0.0, 1.0);
+                gl_PointSize = uPointSize;
+            }
+        """
+
+        private const val POINT_FS = """
+            precision mediump float;
+            uniform vec4 uColor;
+            void main() {
+                // Carve each square point into a round dot.
+                vec2 c = gl_PointCoord - vec2(0.5);
+                if (dot(c, c) > 0.25) discard;
+                gl_FragColor = uColor;
+            }
         """
     }
 }
