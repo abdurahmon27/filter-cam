@@ -25,7 +25,7 @@ type Props = {
   onClose: () => void;
 };
 
-const BEAUTY_STRENGTH = 0.65;
+const BEAUTY_STRENGTH = 0.85;
 
 export default function CameraScreen({ onClose }: Props) {
   const [permission, requestPermission] = useCameraPermissions();

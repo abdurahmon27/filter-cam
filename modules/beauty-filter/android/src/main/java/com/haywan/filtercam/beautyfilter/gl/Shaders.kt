@@ -69,11 +69,11 @@ internal object Shaders {
 
     /**
      * Beauty composite: blends the blurred (smoothed) scene back over the sharp
-     * scene, but only inside the mask and scaled by strength. The smoothed term
-     * lifts brightness/warmth slightly for a younger, "glow" look.
+     * scene, but only inside the mask and scaled by strength, then evens the skin
+     * tone, tames redness, and lifts brightness for a clean, radiant look.
      *
      * uStrength   overall beauty amount (0..1)
-     * uGlow       extra highlight/brightness lift for shine (0..1)
+     * uGlow       radiance / brightness lift (0..1)
      */
     const val COMPOSITE_FS = """
         precision mediump float;
@@ -88,17 +88,23 @@ internal object Shaders {
             vec3 blurred = texture2D(uBlur, vUV).rgb;
             float m = texture2D(uMask, vUV).r * uStrength;
 
-            // Keep a touch of original texture so skin looks smooth, not plastic.
-            vec3 smoothed = blurred + (scene - blurred) * 0.28;
-            // Brighten + gentle warmth for a youthful glow; more with uGlow.
-            float lift = 1.03 + 0.06 * uGlow;
-            smoothed *= lift;
-            smoothed += vec3(0.020, 0.014, 0.008) * (0.5 + uGlow);
-            // Soft highlight bloom: push the brightest skin toward white a bit.
+            // Smooth skin: keep only a little real texture so it isn't plastic.
+            vec3 smoothed = mix(blurred, scene, 0.18);
+
             float lum = dot(smoothed, vec3(0.299, 0.587, 0.114));
-            float shine = smoothstep(0.6, 1.0, lum) * uGlow * 0.18;
-            smoothed += shine;
-            smoothed = min(smoothed, 1.0);
+            // Even the complexion: pull slightly toward its own luminance to cut
+            // blotchiness, then specifically knock back excess red (redness/acne).
+            smoothed = mix(smoothed, vec3(lum), 0.12);
+            float redExcess = max(smoothed.r - (smoothed.g + smoothed.b) * 0.5, 0.0);
+            smoothed.r -= redExcess * 0.20;
+
+            // Brighten + lift shadows (under-eye) with a touch of warmth.
+            smoothed = smoothed * (1.05 + 0.05 * uGlow) + vec3(0.025, 0.020, 0.014) * (0.6 + uGlow);
+            // Soft radiance in the midtones — NOT a specular highlight, so oily
+            // spots on the nose/forehead don't blow out.
+            float radiance = smoothstep(0.35, 0.75, lum) * (1.0 - smoothstep(0.75, 1.0, lum));
+            smoothed += radiance * uGlow * 0.05;
+            smoothed = clamp(smoothed, 0.0, 1.0);
 
             gl_FragColor = vec4(mix(scene, smoothed, m), 1.0);
         }
