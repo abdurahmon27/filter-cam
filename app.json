@@ -7,14 +7,6 @@
     "icon": "./assets/icon.png",
     "scheme": "filtercam",
     "userInterfaceStyle": "dark",
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.haywan.filtercam",
-      "infoPlist": {
-        "NSCameraUsageDescription": "FilterCam uses the camera to show live beauty and mustache filters.",
-        "ITSAppUsesNonExemptEncryption": false
-      }
-    },
     "android": {
       "package": "com.haywan.filtercam",
       "adaptiveIcon": {

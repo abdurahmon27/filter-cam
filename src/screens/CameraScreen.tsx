@@ -14,11 +14,17 @@ import {
 import FilterBar, { FilterId } from '../components/FilterBar';
 import BeautyOverlay from '../components/BeautyOverlay';
 import MustacheOverlay from '../components/MustacheOverlay';
-import { applyNativeBeauty, isNativeBeautyAvailable } from '../native/beautyFilter';
+import {
+  BeautyCameraView,
+  BeautyCameraViewRef,
+  isBeautyCameraAvailable,
+} from '../../modules/beauty-filter';
 
 type Props = {
   onClose: () => void;
 };
+
+const BEAUTY_STRENGTH = 0.65;
 
 export default function CameraScreen({ onClose }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
@@ -29,6 +35,11 @@ export default function CameraScreen({ onClose }: Props) {
   });
   const [busy, setBusy] = useState(false);
   const cameraRef = useRef<CameraView>(null);
+  const nativeCameraRef = useRef<BeautyCameraViewRef>(null);
+
+  // In a dev/EAS build the Kotlin module renders the camera itself:
+  // MediaPipe face mesh + GL beauty filter + tracked mustache.
+  const useNativeCamera = isBeautyCameraAvailable && BeautyCameraView != null;
 
   const toggle = (id: FilterId) =>
     setFilters((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -58,12 +69,14 @@ export default function CameraScreen({ onClose }: Props) {
   }
 
   const capture = async () => {
-    if (!cameraRef.current || busy) return;
+    if (busy) return;
     try {
       setBusy(true);
-      const photo = await cameraRef.current.takePictureAsync();
-      if (photo?.uri && filters.beauty && isNativeBeautyAvailable()) {
-        await applyNativeBeauty(photo.uri, 0.6);
+      if (useNativeCamera) {
+        // The native capture already includes the beauty filter and mustache.
+        await nativeCameraRef.current?.takePicture();
+      } else {
+        await cameraRef.current?.takePictureAsync();
       }
       // A gallery/preview screen can be added here later.
     } catch (e) {
@@ -76,9 +89,25 @@ export default function CameraScreen({ onClose }: Props) {
   return (
     <View style={styles.container}>
       <View style={styles.cameraWrap}>
-        <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing={facing} />
-        {filters.beauty && <BeautyOverlay />}
-        {filters.mustache && <MustacheOverlay />}
+        {useNativeCamera && BeautyCameraView ? (
+          <BeautyCameraView
+            ref={nativeCameraRef}
+            style={StyleSheet.absoluteFill}
+            facing={facing}
+            smoothing={filters.beauty ? BEAUTY_STRENGTH : 0}
+            mustache={filters.mustache}
+          />
+        ) : (
+          <>
+            <CameraView
+              ref={cameraRef}
+              style={StyleSheet.absoluteFill}
+              facing={facing}
+            />
+            {filters.beauty && <BeautyOverlay />}
+            {filters.mustache && <MustacheOverlay />}
+          </>
+        )}
 
         <Pressable style={styles.closeBtn} onPress={onClose}>
           <Text style={styles.closeText}>✕</Text>

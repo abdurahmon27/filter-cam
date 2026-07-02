@@ -1,16 +1,18 @@
 import { requireOptionalNativeModule } from 'expo';
 
 /**
- * Bridge to the native Swift beauty filter (modules/beauty-filter).
+ * Bridge to the native Kotlin beauty filter (modules/beauty-filter).
  *
  * `requireOptionalNativeModule` returns null when the native module is not
  * present in the running binary — which is the case in Expo Go. In that case
- * the app falls back to the JS BeautyOverlay for the live look, and skips
- * native post-processing on captured photos.
+ * the app falls back to the JS overlays for the live look.
+ *
+ * On Android the live BeautyCameraView applies the beauty filter and the
+ * mustache on the GPU, and `takePicture` captures the filtered frame, so
+ * `applyBeauty` is a no-op kept for API compatibility.
  */
 type BeautyFilterModule = {
   isAvailable(): boolean;
-  /** Returns a file:// URI of the smoothed image. `intensity` is 0..1. */
   applyBeauty(uri: string, intensity: number): Promise<string>;
 };
 

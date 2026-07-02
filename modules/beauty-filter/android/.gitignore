@@ -1,0 +1,7 @@
+# Android/Gradle build artifacts
+build/
+.gradle/
+.cxx/
+.kotlin/
+local.properties
+*.iml

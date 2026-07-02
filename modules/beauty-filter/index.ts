@@ -1,7 +1,35 @@
-// Local Expo native module: beauty-filter
+// Local Expo native module: beauty-filter (Android, Kotlin)
 //
-// The JS app talks to this through src/native/beautyFilter.ts using
-// requireOptionalNativeModule('BeautyFilter'), so there is nothing to export
-// here for the app to import directly. This file exists so the module folder
-// is a valid package; the real implementation lives in ios/BeautyFilterModule.swift.
-export {};
+// The native side (android/src/main/java/com/haywan/filtercam/beautyfilter)
+// renders the camera through an OpenGL pipeline: MediaPipe Face Mesh tracks
+// the face, a gaussian-blur pass smooths skin only inside the face oval
+// (eyes, brows and lips are punched out of the mask), and a mustache sprite
+// is anchored to the nose/upper-lip landmarks.
+import { requireNativeView, requireOptionalNativeModule } from 'expo';
+import type * as React from 'react';
+import type { ViewProps } from 'react-native';
+
+export type BeautyCameraViewProps = ViewProps & {
+  /** Which camera to use. Defaults to 'front'. */
+  facing?: 'front' | 'back';
+  /** Skin-smoothing strength, 0..1. 0 disables the beauty filter. */
+  smoothing?: number;
+  /** Show the face-tracked mustache. */
+  mustache?: boolean;
+};
+
+export type BeautyCameraViewRef = {
+  /** Captures the current filtered frame; resolves to a file:// URI. */
+  takePicture(): Promise<string>;
+};
+
+const nativeModule = requireOptionalNativeModule('BeautyFilter');
+
+/** True when running in a build that contains the native module (not Expo Go). */
+export const isBeautyCameraAvailable = nativeModule != null;
+
+export const BeautyCameraView = (
+  isBeautyCameraAvailable ? requireNativeView('BeautyFilter') : null
+) as React.ComponentType<
+  BeautyCameraViewProps & { ref?: React.Ref<BeautyCameraViewRef> }
+> | null;

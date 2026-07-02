@@ -1,89 +1,82 @@
 # FilterCam 🥸
 
-A React Native (Expo) camera app with live filters, built to develop from Linux/NixOS and ship to iPhone via EAS Build.
+A React Native (Expo) camera app with **real face-tracked filters on Android**,
+implemented in **Kotlin** as a local Expo native module.
 
 - **Home screen** → **Open Camera** button
 - **Camera screen** with a bottom filter bar:
-  - **Beauty ✨** — live soft blur + warm wash (JS overlay). On captured photos it runs a real Core Image skin-smoothing pass via a native **Swift** module when available.
-  - **Mustache 🥸** — a draggable mustache you position over your face.
-- Flip camera + shutter button.
+  - **Beauty ✨** — GPU skin smoothing applied **only to the face**: MediaPipe
+    Face Mesh (478 landmarks) builds a mask from the face oval with the eyes,
+    brows and lips punched out, and an OpenGL blur/composite pipeline smooths
+    just that region.
+  - **Mustache 🥸** — a mustache sprite anchored to the nose/upper-lip
+    landmarks, following position, scale and head roll in real time.
+- Flip camera + shutter button. Captures save the **filtered** frame (WYSIWYG).
 
-## Why Expo (and not plain Swift/Xcode)
+iOS support was removed for now — this is Android-only.
 
-This machine is Linux (NixOS). iOS apps can only be *built/signed/installed* with Xcode on macOS. Expo lets you:
-- **Develop on Linux** and preview on your iPhone over Wi-Fi.
-- **Build a real signed app on Expo's cloud Macs** with `eas build` — no Mac needed.
-
-## Project layout
+## How the native side works (`modules/beauty-filter/android`)
 
 ```
-App.tsx                      # root, switches Home <-> Camera
-src/screens/HomeScreen.tsx   # landing screen + Open Camera button
-src/screens/CameraScreen.tsx # camera, permissions, filter toggles, shutter
-src/components/FilterBar.tsx  # Beauty / Mustache toggle chips
-src/components/BeautyOverlay.tsx    # live beauty look (blur + tint)
-src/components/MustacheOverlay.tsx  # draggable mustache (emoji/shape or PNG)
-src/native/beautyFilter.ts    # JS bridge to the Swift module (safe fallback)
-modules/beauty-filter/        # local Expo native module
-  ios/BeautyFilterModule.swift  #   <-- the Swift beauty filter (Core Image)
+BeautyFilterModule.kt   # Expo module definition: props, takePicture()
+BeautyCameraView.kt     # ExpoView hosting a GLSurfaceView + CameraX binding
+FaceTracker.kt          # MediaPipe FaceLandmarker (live stream) + smoothing
+BeautyRenderer.kt       # GL pipeline: camera OES -> scene FBO -> blur ->
+                        # face-mask FBO -> composite -> mustache sprite
+FaceTopology.kt         # landmark index rings (face oval, eyes, brows, lips)
+MustacheTexture.kt      # mustache drawn with Canvas, uploaded as GL texture
+src/main/assets/face_landmarker.task  # MediaPipe face mesh model (~3.7 MB)
 ```
 
-## Run it (two ways to get it on your iPhone)
+Performance notes:
+- Camera frames never leave the GPU for rendering (OES texture -> shaders).
+- Face detection runs on a 4:3 analysis stream (`KEEP_ONLY_LATEST`) on its own
+  thread; MediaPipe runs in LIVE_STREAM mode with a GPU delegate when
+  available (CPU fallback).
+- The blur and mask passes run at quarter resolution; landmarks are
+  exponentially smoothed to keep the mask and mustache stable.
 
-### A) Fastest: preview in Expo Go over Wi-Fi (no Mac, no build)
+## JS layout
 
-> Note: Expo Go does **not** include the native Swift module, so on-capture native
-> smoothing is skipped and the live JS beauty overlay is used. Great for iterating on UI.
-
-1. Install **Expo Go** from the App Store on your iPhone.
-2. Put the phone and laptop on the **same Wi-Fi**.
-3. Start the dev server:
-   ```sh
-   cd ~/Developer/filter-cam
-   npx expo start
-   ```
-4. Scan the QR code with the iPhone Camera app → opens in Expo Go.
-
-### B) Real app with the Swift filter: EAS development build (cloud Mac)
-
-This compiles the native Swift module on Expo's macOS builders and installs a real app.
-
-1. Install and log in to EAS:
-   ```sh
-   npm i -g eas-cli
-   eas login
-   ```
-2. Register your device and build a dev client:
-   ```sh
-   eas device:create          # register your iPhone (needs an Apple Developer account)
-   eas build --profile development --platform ios
-   ```
-3. Open the install link from the build, install on the iPhone, then:
-   ```sh
-   npx expo start --dev-client
-   ```
-
-For a shippable build later: `eas build --profile production --platform ios`.
-
-## Using a real mustache image
-
-Drop a transparent PNG at `assets/mustache.png`, then in
-`src/screens/CameraScreen.tsx` pass it to the overlay:
-
-```tsx
-<MustacheOverlay source={require('../../assets/mustache.png')} />
+```
+App.tsx                       # root, switches Home <-> Camera
+src/screens/HomeScreen.tsx    # landing screen + Open Camera button
+src/screens/CameraScreen.tsx  # renders the native BeautyCameraView when the
+                              # binary contains it; JS-overlay fallback in Expo Go
+src/components/*              # filter bar + Expo Go fallback overlays
+src/native/beautyFilter.ts    # optional-module bridge helpers
+modules/beauty-filter/        # the local Expo module (Kotlin)
+  index.ts                    #   exports BeautyCameraView + types
 ```
 
-## Toolchain notes (NixOS)
+## Architecture
 
-Node came from your existing nvm install (`node v24`). Nothing was added to
-`/etc/nixos`. If you ever want a reproducible shell, a `flake.nix`/`nix-shell`
-with `nodejs` works too.
+For a deeper walk-through of how the pieces fit together — the JS/native
+boundary, the per-frame OpenGL pipeline, face-tracking threads, and the capture
+flow, with **mermaid diagrams** — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Run it on Android
+
+Needs a device/emulator with a camera, JDK 17+, and the Android SDK.
+
+```sh
+npm install
+npx expo run:android          # prebuilds android/ and installs the debug app
+```
+
+`android/` is generated (it's gitignored); the source of truth for native code
+is `modules/beauty-filter/android`.
+
+Expo Go still works for UI iteration, but falls back to the fake JS overlays
+(full-screen blur + draggable mustache) since it can't contain native code.
 
 ## Known limitations / next steps
 
-- **Mustache is drag-positioned**, not auto face-tracked. Real tracking needs a
-  frame processor (`react-native-vision-camera` + a face detector) and a dev build.
-- **Live beauty** is an overlay approximation; the true GPU filter (Swift) runs
-  on captured stills, and only in a dev/EAS build.
-- No photo gallery/preview screen yet — capture just runs the pipeline.
+- Front/back camera orientation and mirroring math is written for a
+  portrait-locked app and needs a quick on-device sanity check (the usual
+  GL/camera gotcha); tune `BeautyRenderer.drawCameraToScene` if the preview is
+  rotated or flipped.
+- Captures come from the rendered preview (`glReadPixels` at view resolution),
+  not the full-resolution sensor still.
+- No photo gallery/preview screen yet — capture saves a JPEG into the app
+  cache and resolves its `file://` URI.
