@@ -47,7 +47,7 @@ class BeautyRenderer(
         private set
 
     private var oesTexture = 0
-    private var mustacheTexture = 0modules/beauty-filter/expo-module.config.json
+    private var mustacheTexture = 0
     private var viewWidth = 1
     private var viewHeight = 1
 
