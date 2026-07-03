@@ -21,6 +21,10 @@
       ],
       "predictiveBackGestureEnabled": false
     },
+    "ios": {
+      "bundleIdentifier": "com.haywan.filtercam",
+      "supportsTablet": false
+    },
     "web": {
       "favicon": "./assets/favicon.png"
     },

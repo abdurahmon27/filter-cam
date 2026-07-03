@@ -3,7 +3,6 @@ package com.haywan.filtercam.beautyfilter.view
 import android.content.Context
 import android.graphics.Bitmap
 import android.opengl.GLSurfaceView
-import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.LifecycleOwner
 import com.haywan.filtercam.beautyfilter.render.BeautyRenderer
@@ -25,7 +24,7 @@ import java.util.concurrent.Executors
 class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
 
     private val glView = GLSurfaceView(context)
-    private val renderer = BeautyRenderer(::onSurfaceTextureReady)
+    private val renderer = BeautyRenderer(::onGlReady)
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
@@ -33,17 +32,7 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
     private val cameraController = CameraController(
         context = context,
         analysisExecutor = analysisExecutor,
-        surfaceTextureProvider = { renderer.surfaceTexture },
-        onBufferSize = { w, h ->
-            renderer.cameraBufferWidth = w
-            renderer.cameraBufferHeight = h
-        },
-        onFrame = { proxy ->
-            // Single source of truth for orientation: the same rotation the
-            // FaceTracker uses to make landmarks upright drives the preview.
-            renderer.cameraRotationDegrees = proxy.imageInfo.rotationDegrees
-            tracker?.analyze(proxy) ?: proxy.close()
-        },
+        onFrame = { proxy -> tracker?.analyze(proxy) ?: proxy.close() },
     )
 
     private var surfaceReady = false
@@ -57,10 +46,16 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         // Model loading (~4 MB) happens off the main thread.
         analysisExecutor.execute {
             tracker = try {
-                FaceTracker(context) { faces ->
-                    renderer.faces = faces
-                    renderer.facesAt = if (faces.isNotEmpty()) SystemClock.uptimeMillis() else 0L
-                }.also { it.isFrontCamera = facingFront }
+                // Decoupled: every frame is displayed immediately (full FPS) while
+                // detection runs on its own thread and publishes landmarks async.
+                FaceTracker(
+                    context,
+                    onFrame = { bitmap ->
+                        renderer.submitFrame(bitmap)
+                        glView.requestRender()
+                    },
+                    onFaces = { faces -> renderer.setFaces(faces) },
+                ).also { it.isFrontCamera = facingFront }
             } catch (t: Throwable) {
                 Log.e(TAG, "FaceTracker init failed; filters will be inactive", t)
                 null
@@ -111,6 +106,14 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         renderer.eyeEnlarge = value.coerceIn(0f, 1f)
     }
 
+    fun setNoseSlim(value: Float) {
+        renderer.noseSlim = value.coerceIn(0f, 1f)
+    }
+
+    fun setFaceSlim(value: Float) {
+        renderer.faceSlim = value.coerceIn(0f, 1f)
+    }
+
     /**
      * Attach a target surface (e.g. from a WebRTC SurfaceTextureHelper) to
      * receive every filtered frame GPU-side, or null to detach. This is the seam
@@ -138,8 +141,7 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
 
     // ---- lifecycle ----
 
-    private fun onSurfaceTextureReady(surfaceTexture: android.graphics.SurfaceTexture) {
-        surfaceTexture.setOnFrameAvailableListener { glView.requestRender() }
+    private fun onGlReady() {
         post {
             surfaceReady = true
             bindCamera()
@@ -155,7 +157,6 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         }
         analysisExecutor.shutdown()
         ioExecutor.shutdown()
-        renderer.releaseSurfaceTexture()
     }
 
     private fun bindCamera() {

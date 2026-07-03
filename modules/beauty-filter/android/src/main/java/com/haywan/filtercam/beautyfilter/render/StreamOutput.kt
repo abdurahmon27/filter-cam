@@ -64,7 +64,7 @@ internal class StreamOutput(surface: Surface) {
 
         EGL14.eglMakeCurrent(display, eglSurface, eglSurface, context)
         GLES20.glViewport(0, 0, width, height)
-        blit.draw(texture, quad)
+        blit.draw(texture, width, height, quad)
         EGLExt.eglPresentationTimeANDROID(display, eglSurface, presentationTimeNs)
         EGL14.eglSwapBuffers(display, eglSurface)
 

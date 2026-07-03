@@ -18,26 +18,27 @@ internal object Shaders {
         void main() { gl_Position = vec4(aPos, 0.0, 1.0); vUV = aUV; }
     """
 
-    /** Camera pass: applies the crop window and the SurfaceTexture/rotation matrix. */
+    /**
+     * Camera pass (single-stream): the frame is a normal 2D texture uploaded from
+     * an already display-oriented bitmap. Applies the cover-crop window and flips
+     * the y axis (bitmaps are top-down, GL textures are bottom-up).
+     */
     const val CAMERA_VS = """
         attribute vec2 aPos;
         attribute vec2 aUV;
-        uniform mat4 uTexMatrix;
         uniform vec4 uCrop; // offset.xy, scale.xy
         varying vec2 vUV;
         void main() {
             gl_Position = vec4(aPos, 0.0, 1.0);
             vec2 uv = uCrop.xy + aUV * uCrop.zw;
-            vUV = (uTexMatrix * vec4(uv, 0.0, 1.0)).xy;
+            vUV = vec2(uv.x, 1.0 - uv.y);
         }
     """
 
-    /** Samples the external OES camera texture. */
     val CAMERA_FS = """
-        #extension GL_OES_EGL_image_external : require
         precision mediump float;
         varying vec2 vUV;
-        uniform samplerExternalOES uTex;
+        uniform sampler2D uTex;
         void main() { gl_FragColor = texture2D(uTex, vUV); }
     """.trimIndent()
 
@@ -68,61 +69,98 @@ internal object Shaders {
     """
 
     /**
-     * Beauty composite: blends the blurred (smoothed) scene back over the sharp
-     * scene inside the face mask, then applies independently-controlled
-     * adjustments so the UI can expose each as its own named "filter".
+     * Beauty composite — a natural, edge-preserving skin retouch (the look real
+     * live-stream filters use), NOT a heavy blur or whitening.
      *
-     * uSmooth   skin smoothing amount / mask blend (0..1)
-     * uGlow     brightness + radiance / highlight (0..1)
-     * uClarity  even skin tone + redness knockback (0..1)
-     * uWarmth   warm tone (0..1)
+     * Method: frequency separation. [uBlur] is a low-pass of the scene; the
+     * high-frequency detail `scene - low` (pores, beard, lashes, lip/nostril
+     * edges) is added back with an EDGE-AWARE weight — kept in full at real edges
+     * (features stay razor-sharp, no halos) and only partly on flat skin (pores
+     * survive, blemishes soften). Nothing is replaced: the retouch is blended
+     * over the original by opacity (uSmooth × skin mask), so texture and the
+     * face's own contours/shadows are preserved.
+     *
+     * Tone is deliberately light to keep contrast + dynamic range: clarity evens
+     * skin colour at CONSTANT luma (no flattening) and keeps skin warm/alive
+     * instead of gray; glow lifts ONLY midtones (never the black point, so no
+     * haze/washout); warmth is a soft GLOBAL grade for a cohesive natural tone.
+     *
+     * [uSkinMask] = oval minus eyes/brows/lips (gates smoothing + tone-even).
+     * [uFaceMask] = full oval (gates glow so the whole face reads cohesive).
+     *
+     * uSmooth   skin-smoothing opacity (0..1)
+     * uGlow     midtone brightness (0..1)
+     * uClarity  even skin tone + life (0..1)
+     * uWarmth   global warm tone (0..1)
      */
     const val COMPOSITE_FS = """
         precision mediump float;
         varying vec2 vUV;
         uniform sampler2D uScene;
         uniform sampler2D uBlur;
-        uniform sampler2D uMask;
+        uniform sampler2D uSkinMask;   // oval minus eyes/brows/lips
+        uniform sampler2D uFaceMask;   // full face oval
         uniform float uSmooth;
         uniform float uGlow;
         uniform float uClarity;
         uniform float uWarmth;
+
+        const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+
         void main() {
             vec3 scene = texture2D(uScene, vUV).rgb;
-            vec3 blurred = texture2D(uBlur, vUV).rgb;
-            float mask = texture2D(uMask, vUV).r;
+            vec3 low   = texture2D(uBlur, vUV).rgb;
+            float skin = texture2D(uSkinMask, vUV).r;
+            float face = texture2D(uFaceMask, vUV).r;
 
-            vec3 c = scene;
-            // Smooth: blend toward blurred but keep a lot of real texture so
-            // beard/skin detail survives (over-smoothing reads as "obviously a
-            // filter"). Only where the smoothed and original differ modestly is
-            // it softened; high-contrast beard edges keep more of themselves.
-            vec3 softened = mix(blurred, scene, 0.35);
-            float detail = clamp(length(scene - blurred) * 3.0, 0.0, 1.0);
-            softened = mix(softened, scene, detail * 0.5);
-            c = mix(c, softened, uSmooth);
+            // --- Edge-aware skin smoothing (frequency separation) ---
+            vec3 high = scene - low;              // fine texture + edges (signed)
+            float amp = length(high);
+            // Keep ALL detail at real edges (sharp features, no halos); keep only
+            // a small fraction on flat skin so acne, pores and blemishes are
+            // cleaned away (like the reference) while beard/lash/brow stay sharp.
+            float edge = smoothstep(0.055, 0.22, amp);
+            float keep = mix(0.28, 1.0, edge);
+            vec3 smoothed = low + high * keep;
+            // Opacity blend over the ORIGINAL, skin mask only.
+            vec3 c = mix(scene, smoothed, uSmooth * skin);
 
-            float lum = dot(c, vec3(0.299, 0.587, 0.114));
-            // Clarity: even the complexion toward luminance + knock back excess red.
-            vec3 clar = mix(c, vec3(lum), 0.16);
-            float redExcess = max(clar.r - (clar.g + clar.b) * 0.5, 0.0);
-            clar.r -= redExcess * 0.35;
-            c = mix(c, clar, uClarity);
+            // --- Clarity: even skin colour toward the local tone at CONSTANT luma
+            // (evens blotch/redness without flattening), then a touch more
+            // saturation so skin stays warm & alive rather than gray/pale. ---
+            float cl = dot(c, LUMA);
+            vec3 localTone = low + (cl - dot(low, LUMA));
+            c = mix(c, localTone, uClarity * skin * 0.5);   // evens redness/acne colour
+            float sl = dot(c, LUMA);
+            c = mix(vec3(sl), c, 1.0 + uClarity * face * 0.08);
 
-            // Glow: brighten using the face's OWN skin colour, never flat white.
-            // Multiplicative lift preserves hue for any skin tone, and the added
-            // radiance is tinted by the local skin colour (uBlur) so dark skin
-            // lifts to a brighter skin tone instead of turning grey/ashy.
-            vec3 glow = c * 1.12;
-            float radiance = smoothstep(0.35, 0.75, lum) * (1.0 - smoothstep(0.75, 1.0, lum));
-            glow += radiance * 0.14 * blurred;
-            c = mix(c, glow, uGlow);
-
-            // Warmth: push toward warm (more red, less blue).
-            c = mix(c, c + vec3(0.055, 0.020, -0.030), uWarmth);
+            // --- Glow: gentle MIDTONE lift (whole face) + a soft skin whitening
+            // toward a lighter, cleaner tone (skin only, so no background haze) —
+            // matches the reference's slightly brighter/whiter skin. Neither lifts
+            // the black point, so no washed-out haze. ---
+            float lum = dot(c, LUMA);
+            float mid = smoothstep(0.12, 0.55, lum) * (1.0 - smoothstep(0.72, 1.0, lum));
+            c += c * (uGlow * face * 0.11 * mid);
+            c += (vec3(1.0) - c) * (uGlow * skin * 0.04);
 
             c = clamp(c, 0.0, 1.0);
-            gl_FragColor = vec4(mix(scene, c, mask), 1.0);
+            vec3 outColor = mix(scene, c, face);
+
+            // --- Warmth: soft GLOBAL grade (whole frame) for a cohesive, natural
+            // warm tone with no face-oval seam. Faded out on very dark pixels so
+            // hair, eyebrows, beard, lashes and pupils keep their true, un-tinted
+            // colour and stay crisp — the warm layer never browns/softens them. ---
+            float darkGuard = smoothstep(0.08, 0.35, dot(outColor, LUMA));
+            outColor += vec3(0.045, 0.016, -0.026) * (uWarmth * darkGuard);
+
+            // --- Life: global micro-contrast + vibrance so the image looks ALIVE,
+            // not flat/"dead" — deepens blacks (hair/brows/beard read truly black),
+            // lifts highlights (facial dimensionality) and enriches colour. ---
+            outColor = (outColor - 0.5) * 1.07 + 0.5;
+            float gL = dot(outColor, LUMA);
+            outColor = mix(vec3(gL), outColor, 1.10);
+
+            gl_FragColor = vec4(clamp(outColor, 0.0, 1.0), 1.0);
         }
     """
 
@@ -142,34 +180,92 @@ internal object Shaders {
     """
 
     /**
-     * Eye-enlarge warp: a localized bulge around each eye center that magnifies
-     * the eyes. At uStrength 0 (or with no eyes) it is a pure blit, so it is safe
-     * to always run. Eye centers/radii are in the sampled texture's UV space.
+     * Final present with a light unsharp-mask sharpen. The camera frame is a lower
+     * resolution upscaled to the screen, which reads soft; this restores crisp
+     * acutance on edges (hair, brows, features, background) for the sharp,
+     * "high-quality" reference look. It self-limits on flat smoothed skin (where
+     * centre ≈ neighbourhood), so it sharpens edges without re-adding skin noise.
      */
-    const val EYE_WARP_FS = """
+    const val SHARPEN_FS = """
         precision mediump float;
         varying vec2 vUV;
         uniform sampler2D uTex;
-        uniform int uEyeCount;
-        uniform vec2 uEyes[10];   // centers in UV (0..1)
-        uniform float uEyeR[10];  // radius in aspect-corrected UV units
-        uniform float uStrength;  // 0..1 enlarge amount
+        uniform vec2 uTexel;    // 1/srcWidth, 1/srcHeight
+        uniform float uAmount;  // sharpen strength
+        void main() {
+            vec3 c = texture2D(uTex, vUV).rgb;
+            vec3 blur = (
+                texture2D(uTex, vUV + vec2(uTexel.x, 0.0)).rgb +
+                texture2D(uTex, vUV - vec2(uTexel.x, 0.0)).rgb +
+                texture2D(uTex, vUV + vec2(0.0, uTexel.y)).rgb +
+                texture2D(uTex, vUV - vec2(0.0, uTexel.y)).rgb
+            ) * 0.25;
+            c = c + (c - blur) * uAmount;
+            gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+        }
+    """
+
+    /**
+     * Face-reshape (liquify) warp: enlarges eyes, and narrows the nose and the
+     * face/jaw by pulling those regions toward the face midline. All strengths 0
+     * (or no faces) is a pure blit, so it is safe to always run. Centers/radii are
+     * in the sampled texture's UV space; radii are aspect-corrected (fraction of
+     * screen height).
+     */
+    const val FACE_RESHAPE_FS = """
+        precision mediump float;
+        varying vec2 vUV;
+        uniform sampler2D uTex;
         uniform float uAspect;    // width / height
+
+        uniform int uFaceCount;
+        uniform float uMidX[5];   // face midline x
+        uniform vec2 uNoseC[5];
+        uniform float uNoseR[5];
+        uniform vec2 uJawC[5];
+        uniform float uJawR[5];
+        uniform float uNose;      // nose-slim strength
+        uniform float uSlim;      // face-slim strength
+
+        uniform int uEyeCount;
+        uniform vec2 uEyes[10];
+        uniform float uEyeR[10];
+        uniform float uEye;       // eye-enlarge strength
+
+        // Compress x toward axisX inside a soft circular region (narrowing).
+        // Max ~30% narrowing at full slider so it stays natural, not a caricature.
+        vec2 pullX(vec2 uv, vec2 c, float r, float axisX, float s) {
+            if (r <= 0.0 || s <= 0.0) return uv;
+            float dist = length(vec2((uv.x - c.x) * uAspect, uv.y - c.y));
+            if (dist < r) {
+                float f = 1.0 - smoothstep(0.0, 1.0, dist / r);
+                uv.x = axisX + (uv.x - axisX) * (1.0 + s * 0.30 * f);
+            }
+            return uv;
+        }
+
+        // Sample nearer a center inside a soft region (magnify). Max ~18% at full.
+        vec2 magnify(vec2 uv, vec2 c, float r, float s) {
+            if (r <= 0.0 || s <= 0.0) return uv;
+            vec2 d = uv - c;
+            float dist = length(vec2(d.x * uAspect, d.y));
+            if (dist < r) {
+                float f = 1.0 - smoothstep(0.0, 1.0, dist / r);
+                uv = c + d * (1.0 - s * 0.35 * f);
+            }
+            return uv;
+        }
+
         void main() {
             vec2 uv = vUV;
+            for (int i = 0; i < 5; i++) {
+                if (i >= uFaceCount) break;
+                uv = pullX(uv, uJawC[i], uJawR[i], uMidX[i], uSlim);
+                uv = pullX(uv, uNoseC[i], uNoseR[i], uNoseC[i].x, uNose);
+            }
             for (int i = 0; i < 10; i++) {
                 if (i >= uEyeCount) break;
-                vec2 d = uv - uEyes[i];
-                vec2 da = vec2(d.x * uAspect, d.y);
-                float dist = length(da);
-                float r = uEyeR[i];
-                if (r > 0.0 && dist < r) {
-                    float pct = dist / r;
-                    // Sample nearer the center inside the eye radius; ease to no
-                    // change at the edge so there is no visible seam.
-                    float factor = 1.0 - uStrength * 0.5 * (1.0 - smoothstep(0.0, 1.0, pct));
-                    uv = uEyes[i] + d * factor;
-                }
+                uv = magnify(uv, uEyes[i], uEyeR[i], uEye);
             }
             gl_FragColor = texture2D(uTex, uv);
         }

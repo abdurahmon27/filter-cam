@@ -4,14 +4,18 @@ A React Native (Expo) camera app with **real face-tracked filters on Android**,
 implemented in **Kotlin** as a local Expo native module.
 
 - **Home screen** → **Open Camera** button
-- **Camera screen** with a bottom filter bar:
+- **Camera screen** with a bottom filter carousel of independent sliders:
   - **Beauty ✨** — GPU skin smoothing applied **only to the face**: MediaPipe
     Face Mesh (478 landmarks) builds a mask from the face oval with the eyes,
     brows and lips punched out, and an OpenGL blur/composite pipeline smooths
-    just that region.
+    just that region. Alongside smoothing are **glow**, **clarity** (even
+    tone / redness reduction) and **warmth** sliders that light the whole face.
+  - **Reshape** — **eye-enlarge**, **nose-slim** and **face-slim** liquify
+    warps, each scaled to the tracked face.
   - **Mustache 🥸** — a mustache sprite anchored to the nose/upper-lip
     landmarks, following position, scale and head roll in real time.
-- Flip camera + shutter button. Captures save the **filtered** frame (WYSIWYG).
+- Flip camera, framing presets, and a shutter button. Captures save the
+  **filtered** frame (WYSIWYG).
 
 Runs on **Android** (Kotlin + OpenGL ES) and **iOS** (Swift + Metal + Vision),
 both behind the same JS component. Up to **5 faces** are tracked at once.
@@ -25,10 +29,10 @@ is deliberately thin.
 
 | Package | Version | Role |
 |---------|---------|------|
-| **`com.google.mediapipe:tasks-vision`** | `0.10.26.1` | **Face tracking.** MediaPipe Tasks *Face Landmarker* — a **478-point face mesh** run in `LIVE_STREAM` mode with a **GPU delegate (CPU fallback)**. This is the SDK that finds the face and its landmarks every frame. |
+| **`com.google.mediapipe:tasks-vision`** | `0.10.26.1` | **Face tracking.** MediaPipe Tasks *Face Landmarker* — a **478-point face mesh** run in `VIDEO` mode on a dedicated detection thread, with a **GPU delegate (CPU fallback)**. This is the SDK that finds the face and its landmarks. |
 | Model asset: `face_landmarker.task` | ~3.7 MB | The MediaPipe face-mesh model, bundled in `src/main/assets` and kept uncompressed (`noCompress 'task'`) so it can be memory-mapped. |
-| **`androidx.camera:camera-core` / `camera-camera2` / `camera-lifecycle`** | `1.6.0` | **CameraX.** Drives the camera: a `Preview` use case feeds the OpenGL surface, and an `ImageAnalysis` use case (`STRATEGY_KEEP_ONLY_LATEST`) feeds frames to MediaPipe on a background executor. |
-| **OpenGL ES 2.0** (platform) | — | **Beauty rendering.** Not a package — the Android platform GL API. `BeautyRenderer` implements the whole per-frame pipeline (scene FBO → two-pass gaussian blur → face-mask FBO → composite → mustache sprite) in hand-written GLSL shaders. |
+| **`androidx.camera:camera-core` / `camera-camera2` / `camera-lifecycle`** | `1.6.0` | **CameraX.** Drives the camera with a **single `ImageAnalysis` use case** (`STRATEGY_KEEP_ONLY_LATEST`, RGBA output) — there is no separate `Preview` use case; the filtered analysis frames *are* what the user sees. Each frame is displayed immediately while a downscaled copy feeds MediaPipe on its own thread. |
+| **OpenGL ES 2.0** (platform) | — | **Beauty rendering.** Not a package — the Android platform GL API. `BeautyRenderer` implements the whole per-frame pipeline (scene FBO → two-pass gaussian blur → two face masks → composite → reshape liquify → mustache → sharpen blit) in hand-written GLSL shaders. |
 | `android.graphics.Canvas` (platform) | — | Draws the mustache sprite once, uploaded as a GL texture (`MustacheTexture.kt`). |
 | `androidx.core:core-ktx` | `1.18.0` | Kotlin extensions. |
 
@@ -74,14 +78,22 @@ ios/       BeautyFilterModule.swift · BeautyCameraView.swift
 ```
 
 Performance notes:
-- Camera frames never leave the GPU for rendering (OES/CVPixelBuffer -> shaders).
-- Face detection runs on a 4:3 analysis stream (`KEEP_ONLY_LATEST`) on its own
-  thread; MediaPipe runs in LIVE_STREAM mode with a GPU delegate when
-  available (CPU fallback). Up to 5 faces are tracked.
-- The blur and mask passes run at quarter resolution; landmarks are
-  exponentially smoothed **per face** to keep the mask and mustache stable.
-- Beauty adds a subtle "glow" (brightness/warmth lift + highlight bloom) inside
-  the face mask for a younger, shinier look.
+- **Display and detection are decoupled.** Every analysis frame is rotated
+  upright and shown immediately (full camera frame rate); a downscaled copy is
+  detected on a dedicated thread and its landmarks are published back
+  asynchronously, so the preview never stalls on MediaPipe.
+- Each preview frame is delivered as an RGBA `Bitmap` and uploaded to a GL
+  texture; all filtering (blur, masks, composite, reshape, sharpen) then runs on
+  the GPU through FBO passes. The **stream output** (`StreamOutput`, see
+  `docs/STREAMING.md`) is fully GPU-resident — no `glReadPixels`.
+- Face detection uses a 4:3 analysis stream (`KEEP_ONLY_LATEST`); MediaPipe runs
+  in `VIDEO` mode with a GPU delegate when available (CPU fallback). Up to 5
+  faces are tracked.
+- The blur and mask passes run at quarter resolution; landmarks are adaptively
+  smoothed **per face** to keep the masks, reshape and mustache stable.
+- Beauty adds a **glow** (brightness + highlight bloom), **clarity** (even tone /
+  redness reduction) and **warmth**, plus optional eye/nose/face **reshape**
+  liquify — all confined to the tracked face.
 
 ## JS layout
 
@@ -123,14 +135,15 @@ A candid assessment of the design, not a sales pitch.
 
 ### What's good
 
-- **The right architecture for real-time filters.** Camera pixels stay on the
-  GPU as an OES external texture from capture to display — nothing is copied to
-  the CPU for the live view. That's the single most important decision for a
-  smooth preview, and it's done correctly.
+- **The right architecture for real-time filters.** All filtering happens on the
+  GPU through FBO passes, and the stream-output path (`StreamOutput`) is fully
+  GPU-resident — no `glReadPixels`. The live preview uploads each analysis frame
+  as a 2D texture (a per-frame CPU→GPU upload; MediaPipe needs the bitmap anyway),
+  which keeps the display and detection paths sharing one frame source.
 - **Face tracking and rendering are decoupled and run off the UI thread.**
-  MediaPipe runs in `LIVE_STREAM` mode on CameraX's analysis executor with
-  `KEEP_ONLY_LATEST`, so detection can lag without ever stalling the preview;
-  the renderer just reads the latest smoothed landmarks via `@Volatile` fields.
+  Detection runs in `VIDEO` mode on its own thread off a single-slot buffer, and
+  the display path shows every frame at full rate without waiting for it; the
+  renderer just reads the latest smoothed landmarks via `@Volatile` fields.
   Producer/consumer with no locks on the hot path.
 - **Beauty is applied *only to the face*, and cheaply.** A landmark-built mask
   (face oval, with eyes/brows/lips punched out) means smoothing doesn't wipe out
@@ -139,10 +152,12 @@ A candid assessment of the design, not a sales pitch.
 - **WYSIWYG capture.** Photos are read back from the same rendered frame
   (`glReadPixels`), so the saved image is exactly what the user saw — no
   separate "apply filter to a still" code path that could drift from the preview.
-- **Stability details are handled.** Landmarks are exponentially smoothed and
-  time-stamped; stale results (>400 ms) are dropped so the filter fades out
-  cleanly when the face leaves the frame. Front-camera mirroring is matched
-  between the analysis bitmap and the preview so coordinates line up.
+- **Stability details are handled.** Landmarks are adaptively smoothed per face
+  (the smoothing eases off during real motion so they don't drag), and the
+  smoothing state resets on a face-count change. When no face is detected the
+  masks clear to black, so the composite is a clean no-op. Front-camera mirroring
+  is applied in the same rotate step that uprights the frame, so coordinates line
+  up with the mirrored preview.
 - **Graceful degradation.** GPU delegate → CPU fallback for MediaPipe; native
   module → JS-overlay fallback in Expo Go. The app doesn't hard-crash when its
   best path isn't available.
@@ -155,9 +170,8 @@ A candid assessment of the design, not a sales pitch.
 - **Capture is preview-resolution, not sensor-resolution.** `glReadPixels` reads
   the on-screen framebuffer, so photos are limited to the view size rather than
   the full camera still — fine for a demo, not for a real camera app.
-- **The preview rotation offset is empirical.** `PREVIEW_ROTATION_OFFSET` in
-  `CameraPass` was tuned on a device to align the preview with the upright
-  landmark space; other sensors/orientations may need a different value.
+- **Portrait-only.** The app is locked to portrait and frames are uprighted from
+  the device-reported `imageInfo.rotationDegrees`; there's no landscape handling.
 - **iOS is written but unverified.** The Swift/Metal/Vision module mirrors the
   Android contract but was authored without a Mac to compile against — expect to
   fix the metallib bundling, capture orientation, and the Vision-synthesized face
@@ -183,8 +197,9 @@ effect. It's a strong foundation, not a finished app.
 
 ## Known limitations / next steps
 
-- The preview rotation is portrait-tuned via `PREVIEW_ROTATION_OFFSET` in
-  `render/CameraPass.kt`; other sensors/orientations may need a different value.
+- The app is portrait-only; frames are uprighted from the device-reported
+  `imageInfo.rotationDegrees` (in `tracking/FaceTracker.kt`), with no landscape
+  handling.
 - iOS (`modules/beauty-filter/ios`) is written but not yet compiled — build it on
   a Mac and work through `ios/README-ios.md` before shipping.
 - Captures come from the rendered preview (`glReadPixels` at view resolution),

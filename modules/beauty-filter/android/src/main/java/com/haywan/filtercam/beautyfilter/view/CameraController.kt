@@ -1,35 +1,30 @@
 package com.haywan.filtercam.beautyfilter.view
 
 import android.content.Context
-import android.graphics.SurfaceTexture
 import android.util.Log
+import android.util.Size
 import android.view.Surface
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.core.SurfaceRequest
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.Executor
 
 /**
- * Owns the CameraX binding: a [Preview] use case whose frames go to the GL
- * [SurfaceTexture], and an [ImageAnalysis] use case that feeds frames to the
- * face tracker. Decoupled from the view/renderer via callbacks.
+ * Owns the CameraX binding for the single-stream pipeline: a single
+ * [ImageAnalysis] use case whose frames are both detected on and displayed.
+ * There is no Preview use case — the filtered frames are what the user sees.
  *
- * @param surfaceTextureProvider supplies the GL SurfaceTexture to render into.
- * @param onBufferSize reports the camera buffer resolution (width, height).
  * @param onFrame receives each analysis frame; the callback owns closing it.
  */
 internal class CameraController(
     private val context: Context,
     private val analysisExecutor: Executor,
-    private val surfaceTextureProvider: () -> SurfaceTexture?,
-    private val onBufferSize: (Int, Int) -> Unit,
     private val onFrame: (ImageProxy) -> Unit,
 ) {
     private var cameraProvider: ProcessCameraProvider? = null
@@ -48,15 +43,20 @@ internal class CameraController(
                     CameraSelector.DEFAULT_BACK_CAMERA
                 }
 
+                // ImageAnalysis defaults to a soft 640x480; this is what the user
+                // both sees AND we detect on (single-stream). Request 1280x960 for
+                // a crisp preview (hair/brows/beard read sharp). The per-frame
+                // rotation now uses filter=false (see FaceTracker) so this higher
+                // resolution stays affordable.
                 val ratio43 = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(1280, 960),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                        )
+                    )
                     .build()
-
-                val preview = Preview.Builder()
-                    .setResolutionSelector(ratio43)
-                    .setTargetRotation(Surface.ROTATION_0)
-                    .build()
-                preview.setSurfaceProvider { request -> provideSurface(request) }
 
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(ratio43)
@@ -66,7 +66,17 @@ internal class CameraController(
                     .build()
                 analysis.setAnalyzer(analysisExecutor) { proxy -> onFrame(proxy) }
 
-                provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                val camera = provider.bindToLifecycle(lifecycleOwner, selector, analysis)
+
+                // Widen the field of view where the device allows it: some front
+                // cameras report a minimum zoom below 1.0 (a wider selfie). This is
+                // a genuine, borderless zoom-out; on cameras whose min is 1.0 it's
+                // simply a no-op.
+                val minZoom = camera.cameraInfo.zoomState.value?.minZoomRatio ?: 1f
+                if (minZoom < 1f) {
+                    camera.cameraControl.setZoomRatio(minZoom)
+                    Log.i(TAG, "Widened FOV to min zoom $minZoom")
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera bind failed", t)
             }
@@ -76,20 +86,6 @@ internal class CameraController(
     fun unbind() {
         cameraProvider?.unbindAll()
         cameraProvider = null
-    }
-
-    private fun provideSurface(request: SurfaceRequest) {
-        val surfaceTexture = surfaceTextureProvider()
-        if (surfaceTexture == null) {
-            request.willNotProvideSurface()
-            return
-        }
-        onBufferSize(request.resolution.width, request.resolution.height)
-        surfaceTexture.setDefaultBufferSize(request.resolution.width, request.resolution.height)
-        val surface = Surface(surfaceTexture)
-        request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {
-            surface.release()
-        }
     }
 
     companion object {

@@ -16,8 +16,10 @@ internal class BlurPass {
 
     /** Two-pass blur of [sourceTexture] into [a] (h) then [b] (v). Result is in [b]. */
     fun blurBoth(sourceTexture: Int, a: Framebuffer, b: Framebuffer, quad: ScreenQuad) {
-        run(sourceTexture, a, 2.0f / a.width, 0f, quad)
-        run(a.texture, b, 0f, 2.0f / a.height, quad)
+        // Wider radius averages out larger blemishes; the composite re-adds only
+        // strong structural edges, so skin still doesn't look plastic.
+        run(sourceTexture, a, 2.6f / a.width, 0f, quad)
+        run(a.texture, b, 0f, 2.6f / a.height, quad)
     }
 
     fun run(sourceTexture: Int, target: Framebuffer, dx: Float, dy: Float, quad: ScreenQuad) {

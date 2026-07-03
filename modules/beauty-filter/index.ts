@@ -23,6 +23,10 @@ export type BeautyCameraViewProps = ViewProps & {
   warmth?: number;
   /** Eye-enlarge amount, 0..1. */
   eyeEnlarge?: number;
+  /** Nose-slim amount, 0..1. */
+  noseSlim?: number;
+  /** Face/jaw-slim amount, 0..1. */
+  faceSlim?: number;
   /** Show the face-tracked mustache. */
   mustache?: boolean;
   /** Overlay every tracked landmark as a dot (debug / face-mesh view). */

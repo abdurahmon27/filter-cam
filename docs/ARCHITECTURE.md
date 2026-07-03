@@ -9,8 +9,9 @@ optional face-mesh debug overlay in real time.
 - **Platforms:** Android (Kotlin + OpenGL ES) and iOS (Swift + Metal + Vision).
   Both implement the same JS-facing contract; the Android side is the reference.
 - **JS ↔ native contract:** a single `<BeautyCameraView>` component (props
-  `facing`, `smoothing`, `mustache`, `faceMesh`) plus a `takePicture()` method,
-  wired through the Expo Modules API.
+  `facing`; the beauty sliders `smoothing`, `glow`, `clarity`, `warmth`,
+  `eyeEnlarge`, `noseSlim`, `faceSlim`; and the toggles `mustache`, `faceMesh`)
+  plus a `takePicture()` method, wired through the Expo Modules API.
 - **Multi-face:** up to 5 faces are tracked and filtered at once.
 
 ---
@@ -22,7 +23,7 @@ graph TD
     subgraph JS["JS / TypeScript (React Native)"]
         App[App.tsx<br/>home ⇄ camera]
         Cam[CameraScreen<br/>full-screen camera + glass controls]
-        FB[FilterBar<br/>beauty / mustache toggles]
+        FC[FilterCarousel<br/>per-filter sliders + toggles]
         Bridge["modules/beauty-filter/index.ts<br/>requireNativeView / requireOptionalNativeModule"]
         Fallback["JS overlays<br/>BeautyOverlay + MustacheOverlay<br/>(Expo Go only)"]
     end
@@ -45,10 +46,10 @@ graph TD
     end
 
     App --> Cam
-    Cam --> FB
+    Cam --> FC
     Cam --> Bridge
     Cam -. "no native binary" .-> Fallback
-    Bridge -->|"props: facing, smoothing, mustache, faceMesh"| Mod
+    Bridge -->|"props: facing, beauty sliders, mustache, faceMesh"| Mod
     Mod --> Android
     Mod --> iOS
 ```
@@ -58,16 +59,18 @@ graph TD
 | File | Responsibility |
 |------|----------------|
 | `App.tsx` | Two-screen switch (home ⇄ camera), no router |
-| `src/screens/CameraScreen.tsx` | Permissions, filter state, full-screen camera, glass (blur) controls, face-mesh toggle |
-| `src/components/FilterBar.tsx` | Beauty / Mustache toggle chips |
+| `src/screens/CameraScreen.tsx` | Permissions, filter state, full-screen camera, glass (blur) controls, framing, face-mesh toggle |
+| `src/components/FilterCarousel.tsx` | Per-filter sliders (smooth/glow/clarity/warm/eyes/nose/slim) + mustache/face-mesh toggles |
 | `modules/beauty-filter/index.ts` | JS view/module bridge + `isBeautyCameraAvailable` |
 | `…/beautyfilter/BeautyFilterModule.kt` | Declares module name, props, `takePicture` (wiring only) |
-| `…/beautyfilter/view/BeautyCameraView.kt` | ExpoView; hosts `GLSurfaceView`, wires camera → renderer → tracker, capture |
-| `…/beautyfilter/view/CameraController.kt` | CameraX binding (Preview + ImageAnalysis), decoupled via callbacks |
-| `…/beautyfilter/tracking/FaceTracker.kt` | MediaPipe 478-point mesh, live-stream, multi-face, per-face smoothing |
-| `…/beautyfilter/tracking/FaceTopology.kt` | Landmark index rings (oval, eyes, brows, lips) + mustache anchors |
+| `…/beautyfilter/view/BeautyCameraView.kt` | ExpoView; hosts `GLSurfaceView`, wires camera → tracker → renderer, capture, stream surface |
+| `…/beautyfilter/view/CameraController.kt` | CameraX binding — a single `ImageAnalysis` stream (no Preview use case) |
+| `…/beautyfilter/tracking/FaceTracker.kt` | MediaPipe 478-point mesh in VIDEO mode on a dedicated detection thread, decoupled from display; multi-face, per-face smoothing |
+| `…/beautyfilter/tracking/FaceTopology.kt` | Landmark index rings (oval, eyes, brows, lips) + mustache/reshape anchors |
 | `…/beautyfilter/render/BeautyRenderer.kt` | GL-thread orchestrator of the per-frame passes |
-| `…/beautyfilter/render/*Pass.kt` | One class per pass: Camera, Blur, FaceMask, Composite, Mustache, FaceMesh |
+| `…/beautyfilter/render/BeautyAdjustments.kt` | Value object holding the seven beauty-slider strengths (clamped 0..1) |
+| `…/beautyfilter/render/*Pass.kt` | One class per pass: Camera, Blur, FaceMask, Composite, FaceReshape, Mustache, FaceMesh, Blit |
+| `…/beautyfilter/render/StreamOutput.kt` | GPU-resident push of each filtered frame to an external `Surface` (LiveKit/WebRTC seam) |
 | `…/beautyfilter/render/Viewport.kt` | Crop (cover) + landmark→screen coordinate mapping |
 | `…/beautyfilter/render/MustacheTexture.kt` | Draws the mustache sprite, uploads as a texture |
 | `…/beautyfilter/gl/*.kt` | GL primitives: `GlUtils`, `Framebuffer`, `ScreenQuad`, `Shaders` |
@@ -96,9 +99,12 @@ com.haywan.filtercam.beautyfilter
 │   └── FaceTopology.kt
 ├── render/                    # GL-thread rendering
 │   ├── BeautyRenderer.kt      # orchestrator
+│   ├── BeautyAdjustments.kt   # the seven slider strengths
 │   ├── Viewport.kt            # crop + coordinate mapping
 │   ├── CameraPass / BlurPass / FaceMaskPass
-│   ├── CompositePass / MustachePass / FaceMeshPass
+│   ├── CompositePass / FaceReshapePass
+│   ├── MustachePass / FaceMeshPass / BlitPass
+│   ├── StreamOutput.kt        # GPU-resident stream surface
 │   └── MustacheTexture.kt
 └── gl/                        # GL primitives
     ├── GlUtils.kt  Framebuffer.kt
@@ -127,29 +133,34 @@ flowchart TD
 
 On Android `BeautyRenderer` runs on the `GLSurfaceView` GL thread in
 `RENDERMODE_WHEN_DIRTY` — it only draws when a new camera frame arrives (or on
-capture). Camera pixels stay on the GPU the whole time (an OES external
-texture), so nothing is copied back to the CPU for the live view. Each numbered
-step is its own `*Pass` class; the renderer just calls them in order.
+capture). Each analysis frame is delivered as an RGBA `Bitmap` (already rotated
+upright and mirrored by `FaceTracker`), uploaded to a 2D texture at the top of
+`onDrawFrame`, and then filtered entirely on the GPU through a chain of FBO
+passes. Each numbered step is its own `*Pass` class; the renderer just calls them
+in order.
 
 ```mermaid
 flowchart LR
-    OES["Camera frame<br/>(OES external texture)"] --> Scene
+    Tex["Camera frame Bitmap<br/>→ uploaded to a 2D texture"] --> Scene
 
     subgraph Frame["onDrawFrame — one camera frame"]
-        Scene["1 · CameraPass → Scene FBO<br/>rotate + cover-crop<br/>= exactly what's on screen"]
+        Scene["1 · CameraPass → Scene FBO<br/>cover-crop + y-flip<br/>= exactly what's on screen"]
         Blur["2 · BlurPass (¼ res)<br/>two-pass gaussian"]
-        Mask["3 · FaceMaskPass (¼ res)<br/>per face: oval filled;<br/>eyes/brows/lips punched out; softened"]
-        Comp["4 · CompositePass → screen<br/>mix(scene, smoothed+glow, mask × strength)"]
-        Sprite["5 · MustachePass<br/>sprite per face (if enabled)"]
-        Dots["6 · FaceMeshPass<br/>landmark dots per face (if enabled)"]
+        Mask["3 · FaceMaskPass (¼ res)<br/>per face: skin mask (oval − eyes/brows/lips)<br/>+ full face mask; both feathered"]
+        Comp["4 · CompositePass → beauty FBO<br/>smoothing (skin mask) + glow/clarity/warmth (face mask)"]
+        Reshape["5 · FaceReshapePass → final FBO<br/>eye-enlarge / nose-slim / face-slim liquify"]
+        Sprite["6 · MustachePass<br/>sprite per face (if enabled)"]
+        Dots["7 · FaceMeshPass<br/>landmark dots per face (if enabled)"]
+        Blit["8 · BlitPass → screen (+ stream)<br/>unsharp-mask sharpen"]
     end
 
     Scene --> Blur --> Comp
     Scene --> Comp
     Mask --> Comp
-    Comp --> Sprite --> Dots --> Out([Display / capture])
+    Comp --> Reshape --> Sprite --> Dots --> Blit --> Out([Display / stream / capture])
 
     LM["smoothed landmarks<br/>per face (FaceTracker)"] -.-> Mask
+    LM -.-> Reshape
     LM -.-> Sprite
     LM -.-> Dots
 ```
@@ -159,62 +170,84 @@ Notes that make it fast and stable:
 - **Quarter-resolution** blur and mask passes — the expensive work runs on
   ¼ × ¼ = 1/16 of the pixels.
 - **Cover-crop** (`Viewport`): the camera 4:3 frame is center-cropped to fill the
-  view with no letterbox bars. Crop aspect follows the *landmark orientation*,
-  independent of the preview texture's rotation offset.
-- The **mask** is built from `FaceTopology` rings drawn as triangle fans, **for
-  every tracked face**: the face oval is filled white, then eyes/brows/lips are
-  drawn black (slightly inflated) so smoothing never touches them; then blurred
-  for a soft edge.
-- The **composite** shader blends the sharp scene toward the blurred version only
-  where the mask is white, scaled by `smoothing`. It also applies a **youthful
-  glow**: a small brightness/warmth lift plus a highlight bloom (`uGlow`) for a
-  "younger, shinier" skin look.
-- Landmarks older than **400 ms** are treated as stale and dropped, so the filter
-  fades out cleanly when the face leaves the frame.
+  view with no letterbox bars. The frame is already upright when it reaches the
+  renderer (`FaceTracker` applies `imageInfo.rotationDegrees` + front-camera
+  mirror with `filter=false`, a pixel-exact rotate), so `CameraPass` only crops
+  and y-flips — there is no empirical rotation offset.
+- **Two masks** are built from `FaceTopology` rings drawn as triangle fans, **for
+  every tracked face**, both feathered with an edge blur:
+  - the **skin mask** — the face oval filled white with eyes/brows/lips punched
+    black — gates *smoothing only*, so features stay sharp;
+  - the **full face mask** — the oval with nothing punched out — gates the
+    *tone/light* adjustments so the whole face (eyes, lips, beard included)
+    brightens uniformly instead of leaving those regions looking shaded.
+- The **composite** shader blends the sharp scene toward the blurred version
+  inside the skin mask (scaled by `smoothing`), and applies `glow` (brightness +
+  highlight bloom), `clarity` (even tone / redness reduction) and `warmth` inside
+  the face mask.
+- **FaceReshapePass** liquifies the composited image — enlarging eyes, narrowing
+  the nose, slimming the jaw — by warping sampled UVs around inter-eye-scaled
+  regions. With all three strengths at 0 it degrades to a plain blit, so it is
+  always safe in the chain.
+- **BlitPass** presents the final texture with a light unsharp-mask sharpen (the
+  frame is upscaled from the analysis resolution, so this restores acutance) to
+  both the screen and, when attached, the stream surface (§4).
 
 ---
 
 ## 4. Face tracking data flow (and the threads)
 
-Three threads cooperate. CameraX delivers analysis frames on a dedicated
-executor; MediaPipe runs in `LIVE_STREAM` mode and calls back asynchronously;
-results are exponentially smoothed **per face** and handed to the renderer via
-`@Volatile` fields.
+Three threads cooperate, and — this is the key design point — **display and
+detection are decoupled**. Every analysis frame is rotated upright and sent
+straight to the renderer for display, so the preview runs at the full camera
+frame rate; detection is *not* on that path. A downscaled copy of each frame is
+dropped into a single-slot buffer that a dedicated `FaceDetect` thread consumes
+as fast as it can (MediaPipe in `RunningMode.VIDEO`), publishing per-face
+smoothed landmarks back to the renderer via `@Volatile` fields.
 
 ```mermaid
 sequenceDiagram
     participant Cam as CameraX ImageAnalysis (analysis executor)
     participant FT as FaceTracker
+    participant DT as FaceDetect thread
     participant MP as MediaPipe FaceLandmarker (GPU, CPU fallback)
     participant R as BeautyRenderer (GL thread)
 
-    Cam->>FT: analyze(ImageProxy) - RGBA, KEEP_ONLY_LATEST
-    FT->>FT: rotate upright + mirror if front camera
-    FT->>MP: detectAsync(bitmap, timestamp)
-    Note over Cam,FT: proxy.close() then next frame can arrive
-    MP-->>FT: onResult(up to 5 faces × 478 landmarks), async
-    FT->>FT: per-face smoothing (alpha=0.55); reset on face-count change or 300 ms gap
-    FT->>R: set renderer.faces = Array&lt;FloatArray&gt;, facesAt = now
-    R->>R: next onDrawFrame uses faces (if fresher than 400 ms)
+    Cam->>FT: analyze(ImageProxy) — RGBA, KEEP_ONLY_LATEST
+    FT->>FT: rotate upright + mirror if front camera (filter=false)
+    FT->>DT: submit downscaled copy (640px long side, single-slot; drop stale)
+    FT->>R: submitFrame(upright bitmap) → requestRender()  [full FPS]
+    DT->>MP: detectForVideo(bitmap, videoTs++)
+    MP-->>DT: up to 5 faces × 478 normalized landmarks
+    DT->>DT: per-face adaptive smoothing; reset on face-count change
+    DT->>R: setFaces(Array&lt;FloatArray&gt;)
+    R->>R: next onDrawFrame filters the newest frame with the newest landmarks
 ```
 
 Details worth knowing:
 
-- **`STRATEGY_KEEP_ONLY_LATEST`** — if detection can't keep up, intermediate
-  frames are dropped rather than queued, so tracking never lags behind.
+- **Decoupled display + detection** — the preview never waits for MediaPipe. If
+  detection can't keep up it processes the latest frame and skips the rest; during
+  fast motion the landmarks may lag the displayed frame by a frame or two, which
+  the per-frame smoothing keeps from looking jittery.
+- **Detection resolution** — landmarks are normalized (0..1), so detection runs on
+  a cheap 640px-long-side copy while the preview stays at the full analysis
+  resolution; the coordinates still map 1:1.
+- **`STRATEGY_KEEP_ONLY_LATEST`** — CameraX drops intermediate analysis frames
+  rather than queuing them, so the pipeline always works on the freshest frame.
 - **Multi-face** — each detected face is emitted as its own `FloatArray`; the
   frame is `Array<FloatArray>` (empty = no faces). Smoothing is per face index and
   resets when the face count changes (ordering isn't stable across that boundary).
-- **Front-camera mirroring** — the analysis bitmap is flipped horizontally to
-  match the mirrored preview, so landmark coordinates line up with what the user
-  sees.
+- **Adaptive landmark smoothing** — a low base smoothing takes the jitter off,
+  but the factor rises with per-point motion so the landmarks snap to the current
+  frame during real movement instead of dragging.
+- **Front-camera mirroring** — the frame is flipped horizontally (about its
+  centre, combined with the upright rotation) so landmark coordinates line up with
+  the mirrored selfie preview.
 - **GPU delegate with CPU fallback** — `FaceTracker` tries the GPU delegate first
   and silently falls back to CPU if unavailable.
 - **Coordinate mapping** — `Viewport` remaps normalized upright landmarks into the
-  visible (cropped) region for the mask, mustache and mesh dots.
-- **Preview rotation** — the camera texture gets a fixed `PREVIEW_ROTATION_OFFSET`
-  (see `CameraPass`) on top of `imageInfo.rotationDegrees` to align the preview
-  with the upright landmark space. This was tuned empirically on-device.
+  visible (cropped) region for the masks, reshape, mustache and mesh dots.
 
 ---
 
@@ -229,10 +262,11 @@ sequenceDiagram
 
     Note over JS: state → props
     JS->>M: facing = 'front' | 'back'
-    JS->>M: smoothing = beauty ? 0.65 : 0
+    JS->>M: smoothing / glow / clarity / warmth = 0..1
+    JS->>M: eyeEnlarge / noseSlim / faceSlim = 0..1
     JS->>M: mustache = true | false
     JS->>M: faceMesh = true | false
-    M->>V: setFacing / setSmoothing / setMustache / setFaceMesh
+    M->>V: setFacing / set<Slider> / setMustache / setFaceMesh
     V->>R: update @Volatile fields (rebinds camera on flip)
 
     Note over JS: shutter pressed
@@ -257,7 +291,7 @@ Both platforms implement the identical JS contract, but the internals differ:
 
 | Concern | Android | iOS |
 |---------|---------|-----|
-| Camera | CameraX (`Preview` + `ImageAnalysis`) | AVFoundation (`AVCaptureVideoDataOutput`) |
+| Camera | CameraX (single `ImageAnalysis` stream) | AVFoundation (`AVCaptureVideoDataOutput`) |
 | Face landmarks | MediaPipe FaceLandmarker, **478-point mesh** | Apple **Vision** `VNDetectFaceLandmarksRequest` (coarser regions) |
 | GPU render | OpenGL ES 2.0 + GLSL | Metal + `Shaders.metal` |
 | Mask source | dense mesh rings | face contour + eyes/brows/lips regions (synthesized oval) |

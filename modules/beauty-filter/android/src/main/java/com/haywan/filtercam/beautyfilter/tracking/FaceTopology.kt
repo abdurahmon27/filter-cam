@@ -33,4 +33,12 @@ internal object FaceTopology {
     const val UPPER_LIP_TOP = 0    // top-center of the upper lip
     const val MOUTH_LEFT = 61
     const val MOUTH_RIGHT = 291
+
+    // Anchors for face reshaping (liquify).
+    const val NOSE_TIP = 4
+    const val NOSE_ALA_LEFT = 129   // left nostril wing
+    const val NOSE_ALA_RIGHT = 358  // right nostril wing
+    const val CHEEK_LEFT = 234      // left face edge (cheek)
+    const val CHEEK_RIGHT = 454     // right face edge (cheek)
+    const val CHIN = 152            // bottom of chin
 }

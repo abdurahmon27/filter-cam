@@ -3,7 +3,6 @@ package com.haywan.filtercam.beautyfilter.tracking
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.os.SystemClock
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -14,24 +13,36 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 
 /**
- * Runs MediaPipe Face Landmarker (478-point face mesh) on camera frames in
- * live-stream mode and publishes temporally smoothed, display-oriented
- * normalized landmarks to the renderer.
+ * Runs MediaPipe Face Landmarker (478-point face mesh), **decoupled from display**.
  *
- * Multi-face: up to [MAX_FACES] faces are tracked. Each detected face is emitted
- * as its own `FloatArray` of `478 * 2` normalized (x, y) coordinates; the whole
- * frame is delivered as an `Array<FloatArray>` (empty array = no faces).
- * Smoothing is applied per face index and reset whenever the face count changes.
+ * Every camera frame is rotated upright and handed straight to [onFrame] for
+ * display, so the preview runs at the full camera frame rate. Detection is *not*
+ * on that path: a downscaled copy of each frame is dropped into a single-slot
+ * buffer that a dedicated [detectThread] consumes as fast as it can, publishing
+ * landmarks via [onFaces]. If detection can't keep up it simply processes the
+ * latest frame and skips the rest — the display never waits for it.
+ *
+ * The detected landmarks are normalized (0..1), so detecting on a smaller copy
+ * still maps 1:1 onto the full-resolution display frame. The trade-off vs the old
+ * frame-locked design is that landmarks can lag the displayed frame by a frame or
+ * two during fast motion; the per-frame smoothing keeps that from looking jittery.
  */
 internal class FaceTracker(
     context: Context,
+    private val onFrame: (Bitmap) -> Unit,
     private val onFaces: (Array<FloatArray>) -> Unit,
 ) {
     private val landmarker: FaceLandmarker
     private var smoothed: Array<FloatArray>? = null
-    private var lastResultAt = 0L
+    private var videoTs = 0L
 
     @Volatile var isFrontCamera = true
+
+    // ---- background detection (decoupled from the display path) ----
+    @Volatile private var running = true
+    private val detectLock = Any()
+    private var pendingDetect: Bitmap? = null
+    private val detectThread = Thread({ detectLoop() }, "FaceDetect")
 
     init {
         landmarker = try {
@@ -40,6 +51,7 @@ internal class FaceTracker(
             Log.w(TAG, "GPU delegate unavailable, falling back to CPU", t)
             createLandmarker(context, Delegate.CPU)
         }
+        detectThread.start()
     }
 
     private fun createLandmarker(context: Context, delegate: Delegate): FaceLandmarker {
@@ -49,31 +61,39 @@ internal class FaceTracker(
             .build()
         val options = FaceLandmarker.FaceLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.LIVE_STREAM)
+            .setRunningMode(RunningMode.VIDEO)
             .setNumFaces(MAX_FACES)
             .setMinFaceDetectionConfidence(0.5f)
             .setMinFacePresenceConfidence(0.5f)
             .setMinTrackingConfidence(0.5f)
-            .setResultListener { result, _ -> handleResult(result) }
-            .setErrorListener { e -> Log.w(TAG, "FaceLandmarker error", e) }
             .build()
         return FaceLandmarker.createFromOptions(context, options)
     }
 
-    /** Called on the ImageAnalysis executor. Closes the proxy when done. */
+    /**
+     * Called on the CameraX analysis executor. Rotates the frame upright, sends it
+     * to the display immediately, and queues a downscaled copy for detection.
+     */
     fun analyze(imageProxy: ImageProxy) {
         try {
-            val bitmap = imageProxy.toBitmap()
+            val src = imageProxy.toBitmap()
             val rotation = imageProxy.imageInfo.rotationDegrees
             val matrix = Matrix().apply {
                 postRotate(rotation.toFloat())
                 if (isFrontCamera) {
-                    // Match the mirrored preview that the user sees.
-                    postScale(-1f, 1f, bitmap.width / 2f, bitmap.height / 2f)
+                    postScale(-1f, 1f, src.width / 2f, src.height / 2f)
                 }
             }
-            val upright = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            landmarker.detectAsync(BitmapImageBuilder(upright).build(), SystemClock.uptimeMillis())
+            // filter=false: a 90/270° rotation (+ mirror) is pixel-exact.
+            val upright = Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, false)
+            if (upright !== src) src.recycle()
+
+            // Build the detection copy BEFORE the display takes ownership of
+            // `upright` (the renderer recycles it after upload).
+            submitForDetection(downscaleForDetection(upright))
+
+            // Display this frame now — never blocked by detection.
+            onFrame(upright)
         } catch (t: Throwable) {
             Log.w(TAG, "analyze failed", t)
         } finally {
@@ -81,17 +101,63 @@ internal class FaceTracker(
         }
     }
 
-    private fun handleResult(result: FaceLandmarkerResult) {
-        val faces = result.faceLandmarks()
-        if (faces.isNullOrEmpty()) {
+    /** A smaller, independently-owned copy for the detector (normalized coords match). */
+    private fun downscaleForDetection(src: Bitmap): Bitmap {
+        val longSide = maxOf(src.width, src.height)
+        if (longSide <= DETECT_LONG_SIDE) {
+            return src.copy(src.config ?: Bitmap.Config.ARGB_8888, false)
+        }
+        val scale = DETECT_LONG_SIDE.toFloat() / longSide
+        val w = (src.width * scale).toInt().coerceAtLeast(1)
+        val h = (src.height * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(src, w, h, true)
+        // createScaledBitmap can return the source unchanged; never share it.
+        return if (scaled === src) src.copy(src.config ?: Bitmap.Config.ARGB_8888, false) else scaled
+    }
+
+    /** Hand the latest detection frame to the detector, dropping any unconsumed one. */
+    private fun submitForDetection(bmp: Bitmap) {
+        synchronized(detectLock) {
+            pendingDetect?.recycle()
+            pendingDetect = bmp
+            (detectLock as Object).notify()
+        }
+    }
+
+    private fun detectLoop() {
+        while (true) {
+            val bmp = synchronized(detectLock) {
+                while (running && pendingDetect == null) {
+                    try { (detectLock as Object).wait() } catch (_: InterruptedException) {}
+                }
+                val b = pendingDetect
+                pendingDetect = null
+                b
+            } ?: if (running) continue else break
+
+            try {
+                val result = landmarker.detectForVideo(
+                    BitmapImageBuilder(bmp).build(), videoTs++
+                )
+                onFaces(smooth(result))
+            } catch (t: Throwable) {
+                Log.w(TAG, "detect failed", t)
+            } finally {
+                bmp.recycle()
+            }
+        }
+    }
+
+    /** Converts + lightly smooths the result to take the jitter off the landmarks. */
+    private fun smooth(result: FaceLandmarkerResult): Array<FloatArray> {
+        val faceList = result.faceLandmarks()
+        if (faceList.isNullOrEmpty()) {
             smoothed = null
-            onFaces(emptyArray())
-            return
+            return emptyArray()
         }
 
-        val now = SystemClock.uptimeMillis()
-        val fresh = Array(faces.size) { f ->
-            val face = faces[f]
+        val fresh = Array(faceList.size) { f ->
+            val face = faceList[f]
             FloatArray(face.size * 2).also { out ->
                 for (i in face.indices) {
                     out[i * 2] = face[i].x()
@@ -101,38 +167,30 @@ internal class FaceTracker(
         }
 
         val prev = smoothed
-        // Reset smoothing when the number of faces changes or after a gap, since
-        // face ordering is not guaranteed stable across those boundaries.
         val out: Array<FloatArray> =
-            if (prev == null || prev.size != fresh.size || now - lastResultAt > 300) {
+            if (prev == null || prev.size != fresh.size) {
                 fresh
             } else {
                 Array(fresh.size) { f ->
                     val p = prev[f]
                     val n = fresh[f]
-                    if (p.size != n.size) {
-                        n
-                    } else {
-                        // Velocity-adaptive smoothing: when a point moves fast the
-                        // blend weight approaches 1 (follows the face with almost no
-                        // lag); when it is nearly still it stays low (no jitter).
-                        FloatArray(n.size) { i ->
-                            val d = n[i] - p[i]
-                            val a = (SMOOTHING_BASE + kotlin.math.abs(d) * SMOOTHING_ADAPT)
-                                .coerceAtMost(1f)
-                            p[i] + d * a
-                        }
+                    if (p.size != n.size) n
+                    else FloatArray(n.size) { i ->
+                        val d = n[i] - p[i]
+                        val a = (SMOOTHING_BASE + kotlin.math.abs(d) * SMOOTHING_ADAPT).coerceAtMost(1f)
+                        p[i] + d * a
                     }
                 }
             }
-
         smoothed = out
-        lastResultAt = now
-        // Deep-copy so the renderer never reads a buffer we mutate next frame.
-        onFaces(Array(out.size) { out[it].copyOf() })
+        return Array(out.size) { out[it].copyOf() }
     }
 
     fun release() {
+        running = false
+        synchronized(detectLock) { (detectLock as Object).notifyAll() }
+        try { detectThread.join(500) } catch (_: InterruptedException) {}
+        synchronized(detectLock) { pendingDetect?.recycle(); pendingDetect = null }
         try {
             landmarker.close()
         } catch (t: Throwable) {
@@ -143,11 +201,16 @@ internal class FaceTracker(
     companion object {
         private const val TAG = "FaceTracker"
         private const val MODEL_ASSET = "face_landmarker.task"
-        // Velocity-adaptive smoothing weights: effective alpha =
-        // BASE + |delta| * ADAPT, clamped to 1. Low base keeps a still face
-        // jitter-free; the ADAPT term makes a moving face snap to real-time.
-        private const val SMOOTHING_BASE = 0.5f
-        private const val SMOOTHING_ADAPT = 14f
         private const val MAX_FACES = 5
+
+        // Detection input long-side. Landmarks are normalized, so this can be well
+        // below the display resolution — keeps detection cheap without hurting the
+        // sharp full-res preview.
+        private const val DETECT_LONG_SIDE = 640
+
+        // Light jitter smoothing on the landmarks; snaps to the current frame
+        // during real motion.
+        private const val SMOOTHING_BASE = 0.6f
+        private const val SMOOTHING_ADAPT = 25f
     }
 }

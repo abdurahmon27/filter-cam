@@ -28,26 +28,47 @@ export const theme = {
   },
 } as const;
 
-export type FilterId = 'smooth' | 'glow' | 'clarity' | 'warm' | 'eyes';
+export type FilterId =
+  | 'smooth'
+  | 'glow'
+  | 'clarity'
+  | 'warm'
+  | 'eyes'
+  | 'nose'
+  | 'slim';
 
 export const BEAUTY_FILTERS: {
   id: FilterId;
   label: string;
   icon: string;
   /** native prop name driven by this filter's intensity */
-  prop: 'smoothing' | 'glow' | 'clarity' | 'warmth' | 'eyeEnlarge';
+  prop:
+    | 'smoothing'
+    | 'glow'
+    | 'clarity'
+    | 'warmth'
+    | 'eyeEnlarge'
+    | 'noseSlim'
+    | 'faceSlim';
 }[] = [
   { id: 'smooth', label: 'Smooth', icon: '💧', prop: 'smoothing' },
   { id: 'glow', label: 'Glow', icon: '✨', prop: 'glow' },
   { id: 'clarity', label: 'Clear', icon: '🫧', prop: 'clarity' },
   { id: 'warm', label: 'Warm', icon: '🔆', prop: 'warmth' },
   { id: 'eyes', label: 'Big Eyes', icon: '👁️', prop: 'eyeEnlarge' },
+  { id: 'nose', label: 'Nose', icon: '👃', prop: 'noseSlim' },
+  { id: 'slim', label: 'Slim', icon: '🫰', prop: 'faceSlim' },
 ];
 
+// A polished, flattering look out of the box: clear even skin, soft smoothing,
+// a gentle skin-tone glow and a touch of warmth. Eye-enlarge stays off by
+// default (it's a strong geometric effect users can dial in themselves).
 export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
-  smooth: 0.62,
-  glow: 0.4,
+  smooth: 0.7,
+  glow: 0.3,
   clarity: 0.55,
-  warm: 0.2,
-  eyes: 0,
+  warm: 0.22,
+  eyes: 0.15,
+  nose: 0.1,
+  slim: 0.1,
 };

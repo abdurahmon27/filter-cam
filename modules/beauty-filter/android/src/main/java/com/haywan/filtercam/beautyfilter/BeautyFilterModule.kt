@@ -51,6 +51,14 @@ class BeautyFilterModule : Module() {
                 view.setEyeEnlarge(value ?: 0f)
             }
 
+            Prop("noseSlim") { view, value: Float? ->
+                view.setNoseSlim(value ?: 0f)
+            }
+
+            Prop("faceSlim") { view, value: Float? ->
+                view.setFaceSlim(value ?: 0f)
+            }
+
             Prop("mustache") { view, enabled: Boolean? ->
                 view.setMustache(enabled == true)
             }

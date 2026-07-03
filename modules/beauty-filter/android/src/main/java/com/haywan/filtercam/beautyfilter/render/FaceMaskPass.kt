@@ -10,12 +10,18 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Builds the skin-smoothing mask for every tracked face: the face oval is
- * filled white, then the eyes, brows and lips are punched back to black so the
- * blur only softens skin. The mask is finally blurred for a soft feathered edge.
+ * Builds the two beauty masks for every tracked face.
  *
- * Renders into [maskA]; the two-pass edge blur bounces through [maskB] and ends
- * back in [maskA], which the composite reads.
+ * [skinMask] is the face oval with the eyes, brows and lips punched back to
+ * black, so it gates ONLY the skin-smoothing/blur (features stay sharp).
+ * [faceMask] is the full face oval with nothing punched out, so it gates the
+ * tone/light adjustments (glow, clarity, warmth): the whole face — eyes, lips
+ * and beard included — brightens uniformly instead of leaving those regions
+ * looking dim/"shaded" against lifted skin.
+ *
+ * Both masks are feathered with a two-pass edge blur that bounces through
+ * [scratch]. The skin feather fully resolves back into [skinMask] before the
+ * face feather starts, so the shared scratch buffer is never clobbered mid-pass.
  */
 internal class FaceMaskPass {
     private val program = GlUtils.buildProgram(Shaders.SOLID_VS, Shaders.SOLID_FS)
@@ -28,31 +34,56 @@ internal class FaceMaskPass {
     fun draw(
         faces: Array<FloatArray>,
         viewport: Viewport,
-        maskA: Framebuffer,
-        maskB: Framebuffer,
+        skinMask: Framebuffer,
+        faceMask: Framebuffer,
+        scratch: Framebuffer,
         blur: BlurPass,
         quad: ScreenQuad,
     ) {
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, maskA.framebuffer)
-        GLES20.glViewport(0, 0, maskA.width, maskA.height)
-        GLES20.glClearColor(0f, 0f, 0f, 1f)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (faces.isEmpty()) return
-
-        for (face in faces) {
-            // Oval slightly deflated (0.93) so the mask stays off the hairline and
-            // jaw/beard edge, where smoothing would smear hair and look fake.
-            drawFan(face, FaceTopology.FACE_OVAL, 1f, 0.93f, viewport)
-            drawFan(face, FaceTopology.LEFT_EYE, 0f, 1.6f, viewport)
-            drawFan(face, FaceTopology.RIGHT_EYE, 0f, 1.6f, viewport)
-            drawFan(face, FaceTopology.LEFT_BROW, 0f, 1.4f, viewport)
-            drawFan(face, FaceTopology.RIGHT_BROW, 0f, 1.4f, viewport)
-            drawFan(face, FaceTopology.LIPS_OUTER, 0f, 1.1f, viewport)
+        if (faces.isEmpty()) {
+            // No face: both masks must be fully black so the composite is a no-op.
+            clear(skinMask)
+            clear(faceMask)
+            return
         }
 
-        // Soften the mask edges (two blur passes, ending back in maskA).
-        blur.run(maskA.texture, maskB, 2f / maskA.width, 0f, quad)
-        blur.run(maskB.texture, maskA, 0f, 2f / maskA.height, quad)
+        // --- skin mask: oval MINUS eyes/brows/lips (gates smoothing only) ---
+        clear(skinMask) // leaves skinMask bound for the fans below
+        for (face in faces) {
+            // Draw the oval INSET from the silhouette (see OVAL_INSET), so the
+            // feather below falls off INSIDE the face edge and reaches ~0 by the
+            // true silhouette. The effect fades gradually at the jaw (no hard line)
+            // yet never spills onto the neck/background (no "face melting into the
+            // background" halo).
+            drawFan(face, FaceTopology.FACE_OVAL, 1f, OVAL_INSET, viewport)
+            drawFan(face, FaceTopology.LEFT_EYE, 0f, 1.5f, viewport)
+            drawFan(face, FaceTopology.RIGHT_EYE, 0f, 1.5f, viewport)
+            drawFan(face, FaceTopology.LEFT_BROW, 0f, 1.3f, viewport)
+            drawFan(face, FaceTopology.RIGHT_BROW, 0f, 1.3f, viewport)
+            drawFan(face, FaceTopology.LIPS_OUTER, 0f, 1.1f, viewport)
+        }
+        // Feather so the smoothing fades gradually — soft edge, contained by the
+        // inset so it lands on the face, not the background.
+        blur.run(skinMask.texture, scratch, FEATHER / skinMask.width, 0f, quad)
+        blur.run(scratch.texture, skinMask, 0f, FEATHER / skinMask.height, quad)
+
+        // --- face mask: full oval only (gates tone/light over the whole face) ---
+        clear(faceMask) // leaves faceMask bound for the fan below
+        for (face in faces) {
+            drawFan(face, FaceTopology.FACE_OVAL, 1f, OVAL_INSET, viewport)
+        }
+        // Same inset + feather so tone/light also fades out inside the face edge
+        // and never halos the background.
+        blur.run(faceMask.texture, scratch, FEATHER / faceMask.width, 0f, quad)
+        blur.run(scratch.texture, faceMask, 0f, FEATHER / faceMask.height, quad)
+    }
+
+    /** Binds [fbo], clears it to black, and leaves it bound for subsequent fans. */
+    private fun clear(fbo: Framebuffer) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo.framebuffer)
+        GLES20.glViewport(0, 0, fbo.width, fbo.height)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
     }
 
     /** Draws a landmark ring as a triangle fan, optionally inflated around its centroid. */
@@ -84,5 +115,15 @@ internal class FaceMaskPass {
             GLES20.glGetUniformLocation(program, "uColor"), value, value, value, 1f
         )
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, ring.size + 2)
+    }
+
+    companion object {
+        // Cover the FULL face out to the silhouette landmarks so the whole face is
+        // smoothed (no visible unfiltered rim / patch). The feather below then
+        // fades the effect off right at the silhouette.
+        private const val OVAL_INSET = 1.0f
+        // Feather radius (mask is quarter-res). Soft enough for a seamless edge,
+        // tight enough not to bleed the effect far onto the background.
+        private const val FEATHER = 4f
     }
 }

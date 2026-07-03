@@ -7,9 +7,10 @@ import com.haywan.filtercam.beautyfilter.gl.ScreenQuad
 import com.haywan.filtercam.beautyfilter.gl.Shaders
 
 /**
- * Final beauty composite to the screen: `mix(scene, smoothed, mask * strength)`,
- * where `smoothed` is the blurred scene lifted for a youthful glow. Writes to
- * the default framebuffer (0).
+ * Beauty composite into [target]. Takes two masks: [skinMask] gates the
+ * smoothing (so eyes/brows/lips/beard stay sharp) and [faceMask] gates the
+ * tone/light so the whole face — features included — brightens uniformly.
+ * See [Shaders.COMPOSITE_FS].
  */
 internal class CompositePass {
     private val program = GlUtils.buildProgram(Shaders.FULLSCREEN_VS, Shaders.COMPOSITE_FS)
@@ -17,7 +18,8 @@ internal class CompositePass {
     fun draw(
         scene: Framebuffer,
         blurred: Framebuffer,
-        mask: Framebuffer,
+        skinMask: Framebuffer,
+        faceMask: Framebuffer,
         target: Framebuffer,
         adjust: BeautyAdjustments,
         viewport: Viewport,
@@ -35,8 +37,11 @@ internal class CompositePass {
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, blurred.texture)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uBlur"), 1)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mask.texture)
-        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uMask"), 2)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, skinMask.texture)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uSkinMask"), 2)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE3)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, faceMask.texture)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uFaceMask"), 3)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uSmooth"), adjust.smooth)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uGlow"), adjust.glow)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uClarity"), adjust.clarity)
