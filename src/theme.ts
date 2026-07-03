@@ -65,10 +65,10 @@ export const BEAUTY_FILTERS: {
 // default (it's a strong geometric effect users can dial in themselves).
 export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
   smooth: 0.7,
-  glow: 0.3,
+  glow: 0.4,
   clarity: 0.55,
   warm: 0.15,
   eyes: 0.15,
   nose: 0.1,
-  slim: 0.22,
+  slim: 0.32,
 };

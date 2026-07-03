@@ -140,8 +140,8 @@ internal object Shaders {
             // the black point, so no washed-out haze. ---
             float lum = dot(c, LUMA);
             float mid = smoothstep(0.12, 0.55, lum) * (1.0 - smoothstep(0.72, 1.0, lum));
-            c += c * (uGlow * face * 0.11 * mid);
-            c += (vec3(1.0) - c) * (uGlow * skin * 0.04);
+            c += c * (uGlow * face * 0.13 * mid);
+            c += (vec3(1.0) - c) * (uGlow * skin * 0.06);
 
             c = clamp(c, 0.0, 1.0);
             vec3 outColor = mix(scene, c, face);
@@ -156,7 +156,7 @@ internal object Shaders {
             // --- Life: global micro-contrast + vibrance so the image looks ALIVE,
             // not flat/"dead" — deepens blacks (hair/brows/beard read truly black),
             // lifts highlights (facial dimensionality) and enriches colour. ---
-            outColor = (outColor - 0.5) * 1.07 + 0.5;
+            outColor = (outColor - 0.5) * 1.03 + 0.5;
             float gL = dot(outColor, LUMA);
             outColor = mix(vec3(gL), outColor, 1.05);
 

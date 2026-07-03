@@ -115,8 +115,8 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // --- Glow: gentle midtone lift (whole face) + soft skin whitening. ---
     float lum = dot(c, LUMA);
     float mid = smoothstep(0.12, 0.55, lum) * (1.0 - smoothstep(0.72, 1.0, lum));
-    c += c * (u.glow * face * 0.11 * mid);
-    c += (float3(1.0) - c) * (u.glow * skin * 0.04);
+    c += c * (u.glow * face * 0.13 * mid);
+    c += (float3(1.0) - c) * (u.glow * skin * 0.06);
 
     c = clamp(c, 0.0, 1.0);
     float3 outColor = mix(scene, c, face);
@@ -127,7 +127,7 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     outColor += float3(0.045, 0.016, -0.026) * (u.warmth * darkGuard);
 
     // --- Life: global micro-contrast + vibrance so the image looks alive. ---
-    outColor = (outColor - 0.5) * 1.07 + 0.5;
+    outColor = (outColor - 0.5) * 1.03 + 0.5;
     float gL = dot(outColor, LUMA);
     outColor = mix(float3(gL), outColor, 1.05);
 
