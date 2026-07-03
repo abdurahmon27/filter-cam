@@ -9,7 +9,7 @@
 //    CameraController -> CVPixelBuffer
 //        -> MetalRenderer.updatePixelBuffer  (drawn on the next setNeedsDisplay)
 //        -> FaceTracker.track                (Vision, async, keep-only-latest)
-//    FaceTracker -> FaceLandmarks -> MetalRenderer.setLandmarks
+//    FaceTracker -> [FaceLandmarks] -> MetalRenderer.setFaces
 //
 
 import ExpoModulesCore
@@ -65,8 +65,8 @@ final class BeautyCameraView: ExpoView {
             self.faceTracker.track(pixelBuffer: buffer)
             DispatchQueue.main.async { self.mtkView?.setNeedsDisplay() }
         }
-        faceTracker.onLandmarks = { [weak self] lms in
-            self?.renderer?.setLandmarks(lms)
+        faceTracker.onLandmarks = { [weak self] faces in
+            self?.renderer?.setFaces(faces)
         }
     }
 
@@ -118,6 +118,30 @@ final class BeautyCameraView: ExpoView {
 
     func setSmoothing(_ value: Float) {
         renderer?.smoothing = max(0, min(1, value))
+    }
+
+    func setGlow(_ value: Float) {
+        renderer?.glow = max(0, min(1, value))
+    }
+
+    func setClarity(_ value: Float) {
+        renderer?.clarity = max(0, min(1, value))
+    }
+
+    func setWarmth(_ value: Float) {
+        renderer?.warmth = max(0, min(1, value))
+    }
+
+    func setEyeEnlarge(_ value: Float) {
+        renderer?.eyeEnlarge = max(0, min(1, value))
+    }
+
+    func setNoseSlim(_ value: Float) {
+        renderer?.noseSlim = max(0, min(1, value))
+    }
+
+    func setFaceSlim(_ value: Float) {
+        renderer?.faceSlim = max(0, min(1, value))
     }
 
     func setMustache(_ enabled: Bool) {

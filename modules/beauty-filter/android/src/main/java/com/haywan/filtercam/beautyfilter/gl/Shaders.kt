@@ -158,7 +158,7 @@ internal object Shaders {
             // lifts highlights (facial dimensionality) and enriches colour. ---
             outColor = (outColor - 0.5) * 1.07 + 0.5;
             float gL = dot(outColor, LUMA);
-            outColor = mix(vec3(gL), outColor, 1.10);
+            outColor = mix(vec3(gL), outColor, 1.05);
 
             gl_FragColor = vec4(clamp(outColor, 0.0, 1.0), 1.0);
         }

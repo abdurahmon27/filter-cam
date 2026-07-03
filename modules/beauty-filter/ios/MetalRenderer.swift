@@ -2,25 +2,30 @@
 //  MetalRenderer.swift
 //  BeautyFilter
 //
-//  The Metal render pipeline. Direct conceptual port of Android's BeautyRenderer:
+//  The Metal render pipeline. Direct port of Android's BeautyRenderer +
+//  passes. Per frame:
 //
-//   1. camera texture -> scene target (with center-crop so the target holds
-//      exactly what is displayed)
+//   1. camera texture -> scene target (center-crop so it holds exactly what's
+//      displayed)
 //   2. scene -> quarter-res two-pass gaussian blur (blurA h, blurB v)
-//   3. face-mask target: fill face oval (white), punch out eyes/brows/lips
-//      (black), then blur for a soft edge
-//   4. composite -> output target: mix(scene, smoothed, mask * strength)
-//   5. mustache sprite -> output (alpha blended)
-//   6. optional face-mesh dots -> output
-//   7. blit output -> drawable
+//   3. TWO quarter-res feathered face masks, for every tracked face:
+//        - skin mask (maskA): oval minus eyes/brows/lips  -> gates smoothing
+//        - face mask (maskC): full oval                   -> gates tone/light
+//      (maskB is the shared feather scratch)
+//   4. composite -> outputTex: edge-aware smoothing + glow/clarity/warmth + a
+//      global life grade (mix by the masks)
+//   5. face-reshape (liquify) outputTex -> finalTex: eye-enlarge / nose-slim /
+//      face-slim (a plain blit when no reshape is active)
+//   6. mustache sprite + optional mesh dots -> finalTex (per face)
+//   7. sharpen blit finalTex -> drawable (and -> staging for WYSIWYG capture)
 //
 //  Because CameraController hands us an already-upright, already-mirrored buffer,
 //  there is no rotation math here (unlike Android): we only center-crop.
 //
-//  Coordinate space: landmarks arrive display-normalized (0..1, y-down). Metal
-//  clip space is y-up with +1 at the top, so `toNdc` flips y. Metal texture rows
-//  are top-down, so capture readback needs NO vertical flip (Android's GL path
-//  did).
+//  Coordinate space: landmarks arrive display-normalized (0..1, y-down), which
+//  maps directly to the fullscreen uv space (uv.y = 0 == display top). `toNdc`
+//  converts to clip space (y-up) for the mask/sprite/point geometry. Metal
+//  texture rows are top-down, so capture readback needs NO vertical flip.
 //
 
 import Foundation
@@ -31,10 +36,19 @@ import UIKit
 
 final class MetalRenderer: NSObject, MTKViewDelegate {
 
-    // MARK: - Externally-driven state
-    var smoothing: Float = 0.6
+    // MARK: - Externally-driven state (the beauty sliders, 0..1)
+    var smoothing: Float = 0
+    var glow: Float = 0
+    var clarity: Float = 0
+    var warmth: Float = 0
+    var eyeEnlarge: Float = 0
+    var noseSlim: Float = 0
+    var faceSlim: Float = 0
     var mustacheEnabled = false
     var faceMeshEnabled = false
+
+    private static let maxFaces = 5
+    private static let maxEyes = 10 // 5 faces x 2 eyes
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -44,7 +58,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cameraPipeline: MTLRenderPipelineState!
     private var blurPipeline: MTLRenderPipelineState!
     private var compositePipeline: MTLRenderPipelineState!
-    private var blitPipeline: MTLRenderPipelineState!
+    private var reshapePipeline: MTLRenderPipelineState!
+    private var sharpenPipeline: MTLRenderPipelineState!
     private var solidPipeline: MTLRenderPipelineState!
     private var spritePipeline: MTLRenderPipelineState!
     private var pointPipeline: MTLRenderPipelineState!
@@ -53,10 +68,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var sceneTex: MTLTexture!
     private var blurA: MTLTexture!
     private var blurB: MTLTexture!
-    private var maskA: MTLTexture!
-    private var maskB: MTLTexture!
-    private var outputTex: MTLTexture!   // final composited frame (private)
-    private var stagingTex: MTLTexture!  // shared copy for capture readback
+    private var maskA: MTLTexture!   // skin mask (smoothing)
+    private var maskB: MTLTexture!   // shared feather scratch
+    private var maskC: MTLTexture!   // face mask (tone/light)
+    private var outputTex: MTLTexture!   // composited beauty frame (private)
+    private var finalTex: MTLTexture!    // after reshape + overlays (private)
+    private var stagingTex: MTLTexture!  // shared, sharpened, for capture readback
 
     private var mustacheTex: MTLTexture?
 
@@ -70,17 +87,43 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cropScaleX: Float = 1
     private var cropScaleY: Float = 1
 
+    // Reshape uniform scratch (fixed-size so the buffers are always bound).
+    private var reMidX = [Float](repeating: 0, count: maxFaces)
+    private var reNoseC = [SIMD2<Float>](repeating: .zero, count: maxFaces)
+    private var reNoseR = [Float](repeating: 0, count: maxFaces)
+    private var reJawC = [SIMD2<Float>](repeating: .zero, count: maxFaces)
+    private var reJawR = [Float](repeating: 0, count: maxFaces)
+    private var reEyes = [SIMD2<Float>](repeating: .zero, count: maxEyes)
+    private var reEyeR = [Float](repeating: 0, count: maxEyes)
+
     // Latest inputs, guarded by locks (written from camera / vision queues).
     private let bufferLock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
 
     private let landmarkLock = NSLock()
-    private var landmarks: FaceLandmarks?
-    private var landmarksAt: CFTimeInterval = 0
+    private var faces: [FaceLandmarks] = []
 
     // Capture
     private let captureLock = NSLock()
     private var pendingCapture: ((UIImage) -> Void)?
+
+    // MARK: - Uniform structs (must match Shaders.metal layouts)
+
+    private struct BeautyUniforms {
+        var smooth: Float
+        var glow: Float
+        var clarity: Float
+        var warmth: Float
+    }
+
+    private struct ReshapeScalars {
+        var aspect: Float
+        var faceCount: Int32
+        var eyeCount: Int32
+        var nose: Float
+        var slim: Float
+        var eye: Float
+    }
 
     // MARK: - Init
 
@@ -149,7 +192,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         cameraPipeline = try makePipeline("fullscreen_vertex", "camera_fragment")
         blurPipeline = try makePipeline("fullscreen_vertex", "blur_fragment")
         compositePipeline = try makePipeline("fullscreen_vertex", "composite_fragment")
-        blitPipeline = try makePipeline("fullscreen_vertex", "passthrough_fragment")
+        reshapePipeline = try makePipeline("fullscreen_vertex", "reshape_fragment")
+        sharpenPipeline = try makePipeline("fullscreen_vertex", "sharpen_fragment")
         solidPipeline = try makePipeline("solid_vertex", "solid_fragment")
         spritePipeline = try makePipeline("sprite_vertex", "sprite_fragment", blend: .premultiplied)
         pointPipeline = try makePipeline("point_vertex", "point_fragment", blend: .straightAlpha)
@@ -165,10 +209,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         bufferLock.unlock()
     }
 
-    func setLandmarks(_ lms: FaceLandmarks?) {
+    /// Publish the latest detected faces (empty = no faces). Mirrors Android's
+    /// setFaces; the renderer always filters the newest frame with these.
+    func setFaces(_ faces: [FaceLandmarks]) {
         landmarkLock.lock()
-        landmarks = lms
-        landmarksAt = (lms != nil) ? CACurrentMediaTime() : 0
+        self.faces = faces
         landmarkLock.unlock()
     }
 
@@ -189,7 +234,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        guard let sceneTex = sceneTex else { return }
+        guard sceneTex != nil, finalTex != nil else { return }
 
         // Grab latest camera buffer -> Metal texture.
         bufferLock.lock()
@@ -201,14 +246,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         updateCrop(cameraWidth: cameraTexture.width, cameraHeight: cameraTexture.height)
 
-        // Snapshot landmarks (used only if fresh, matching Android's 400ms gate).
+        // Snapshot the latest faces (used by masks/reshape/overlays).
         landmarkLock.lock()
-        let fresh = (CACurrentMediaTime() - landmarksAt) < 0.4
-        let lms = fresh ? landmarks : nil
+        let lms = faces
         landmarkLock.unlock()
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let drawable = view.currentDrawable else { return }
+
+        let adjust = BeautyUniforms(smooth: clamp01(smoothing), glow: clamp01(glow),
+                                    clarity: clamp01(clarity), warmth: clamp01(warmth))
 
         // 1. camera -> scene
         renderFullscreen(commandBuffer, target: sceneTex, pipeline: cameraPipeline, clear: false) { encoder in
@@ -219,38 +266,37 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         // 2. blur scene (quarter res): horizontal into blurA, vertical into blurB
         let qw = Float(blurA.width), qh = Float(blurA.height)
-        blur(commandBuffer, source: sceneTex, target: blurA, dir: SIMD2<Float>(1.5 / qw, 0))
-        blur(commandBuffer, source: blurA, target: blurB, dir: SIMD2<Float>(0, 1.5 / qh))
+        blur(commandBuffer, source: sceneTex, target: blurA, dir: SIMD2<Float>(2.6 / qw, 0))
+        blur(commandBuffer, source: blurA, target: blurB, dir: SIMD2<Float>(0, 2.6 / qh))
 
-        // 3. face mask (quarter res) + soften
-        renderMask(commandBuffer, landmarks: lms)
+        // 3. two feathered face masks (skin -> maskA, face -> maskC)
+        renderMasks(commandBuffer, faces: lms)
 
-        // 4. composite -> output
+        // 4. composite -> outputTex
         renderFullscreen(commandBuffer, target: outputTex, pipeline: compositePipeline, clear: false) { encoder in
-            var strength = max(0, min(1, smoothing))
+            var u = adjust
             encoder.setFragmentTexture(sceneTex, index: 0)
             encoder.setFragmentTexture(blurB, index: 1)
-            encoder.setFragmentTexture(maskA, index: 2)
-            encoder.setFragmentBytes(&strength, length: MemoryLayout<Float>.stride, index: 0)
+            encoder.setFragmentTexture(maskA, index: 2)  // skin
+            encoder.setFragmentTexture(maskC, index: 3)  // face
+            encoder.setFragmentBytes(&u, length: MemoryLayout<BeautyUniforms>.stride, index: 0)
         }
 
-        // 5. mustache + 6. mesh (drawn onto output, preserving contents)
-        if let lms = lms, mustacheEnabled { drawMustache(commandBuffer, lms) }
-        if let lms = lms, faceMeshEnabled { drawFaceMesh(commandBuffer, lms) }
+        // 5. face reshape (liquify) outputTex -> finalTex (plain blit if inactive)
+        renderReshape(commandBuffer, faces: lms)
 
-        // Capture: blit output -> shared staging before the final blit.
+        // 6. overlays onto finalTex (per face)
+        if mustacheEnabled { for f in lms { drawMustache(commandBuffer, f) } }
+        if faceMeshEnabled { for f in lms { drawFaceMesh(commandBuffer, f) } }
+
+        // Capture: sharpen finalTex -> shared staging (WYSIWYG, includes sharpen).
         captureLock.lock()
         let capture = pendingCapture
         pendingCapture = nil
         captureLock.unlock()
         if let capture = capture {
-            if let blit = commandBuffer.makeBlitCommandEncoder() {
-                blit.copy(from: outputTex, sourceSlice: 0, sourceLevel: 0,
-                          sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                          sourceSize: MTLSize(width: outputTex.width, height: outputTex.height, depth: 1),
-                          to: stagingTex, destinationSlice: 0, destinationLevel: 0,
-                          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-                blit.endEncoding()
+            renderFullscreen(commandBuffer, target: stagingTex, pipeline: sharpenPipeline, clear: false) { encoder in
+                bindSharpen(encoder, source: finalTex)
             }
             commandBuffer.addCompletedHandler { [weak self] _ in
                 guard let self = self, let image = self.readbackImage() else { return }
@@ -258,15 +304,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             }
         }
 
-        // 7. blit output -> drawable
+        // 7. sharpen blit finalTex -> drawable
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = drawable.texture
         rpd.colorAttachments[0].loadAction = .clear
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         rpd.colorAttachments[0].storeAction = .store
         if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-            encoder.setRenderPipelineState(blitPipeline)
-            encoder.setFragmentTexture(outputTex, index: 0)
+            encoder.setRenderPipelineState(sharpenPipeline)
+            bindSharpen(encoder, source: finalTex)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
         }
@@ -318,32 +364,57 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func renderMask(_ commandBuffer: MTLCommandBuffer, landmarks lms: FaceLandmarks?) {
-        // Clear mask to black, then fill polygons.
+    private func bindSharpen(_ encoder: MTLRenderCommandEncoder, source: MTLTexture) {
+        var texel = SIMD2<Float>(1 / Float(max(source.width, 1)), 1 / Float(max(source.height, 1)))
+        var amount: Float = 0.85 // matches Android BlitPass SHARPEN
+        encoder.setFragmentTexture(source, index: 0)
+        encoder.setFragmentBytes(&texel, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+        encoder.setFragmentBytes(&amount, length: MemoryLayout<Float>.stride, index: 1)
+    }
+
+    /// Builds the two feathered masks. maskA = skin (oval minus eyes/brows/lips);
+    /// maskC = full face oval. maskB is the shared feather scratch. Mirrors
+    /// Android's FaceMaskPass (OVAL_INSET 1.0, feather 4 texels, quarter res).
+    private func renderMasks(_ commandBuffer: MTLCommandBuffer, faces: [FaceLandmarks]) {
+        let mw = Float(maskA.width), mh = Float(maskA.height)
+
+        // --- skin mask: oval MINUS eyes/brows/lips ---
+        drawMaskFans(commandBuffer, target: maskA) { encoder in
+            for f in faces {
+                self.fill(encoder, ring: f.faceOval, value: 1.0, inflate: 1.0)
+                self.fill(encoder, ring: f.leftEye, value: 0.0, inflate: 1.5)
+                self.fill(encoder, ring: f.rightEye, value: 0.0, inflate: 1.5)
+                self.fill(encoder, ring: f.leftBrow, value: 0.0, inflate: 1.3)
+                self.fill(encoder, ring: f.rightBrow, value: 0.0, inflate: 1.3)
+                self.fill(encoder, ring: f.outerLips, value: 0.0, inflate: 1.1)
+            }
+        }
+        blur(commandBuffer, source: maskA, target: maskB, dir: SIMD2<Float>(4 / mw, 0))
+        blur(commandBuffer, source: maskB, target: maskA, dir: SIMD2<Float>(0, 4 / mh))
+
+        // --- face mask: full oval only ---
+        drawMaskFans(commandBuffer, target: maskC) { encoder in
+            for f in faces {
+                self.fill(encoder, ring: f.faceOval, value: 1.0, inflate: 1.0)
+            }
+        }
+        blur(commandBuffer, source: maskC, target: maskB, dir: SIMD2<Float>(4 / mw, 0))
+        blur(commandBuffer, source: maskB, target: maskC, dir: SIMD2<Float>(0, 4 / mh))
+    }
+
+    /// Clears `target` to black and runs `body` to fill mask polygons into it.
+    private func drawMaskFans(_ commandBuffer: MTLCommandBuffer,
+                              target: MTLTexture,
+                              body: (MTLRenderCommandEncoder) -> Void) {
         let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = maskA
+        rpd.colorAttachments[0].texture = target
         rpd.colorAttachments[0].loadAction = .clear
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         rpd.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
         encoder.setRenderPipelineState(solidPipeline)
-
-        if let lms = lms {
-            // Face oval white; features punched out black (inflated slightly so
-            // the soft-edge blur doesn't smooth right up to the eyes/lips).
-            fill(encoder, ring: lms.faceOval, value: 1.0, inflate: 1.0)
-            fill(encoder, ring: lms.leftEye, value: 0.0, inflate: 1.6)
-            fill(encoder, ring: lms.rightEye, value: 0.0, inflate: 1.6)
-            fill(encoder, ring: lms.leftBrow, value: 0.0, inflate: 1.4)
-            fill(encoder, ring: lms.rightBrow, value: 0.0, inflate: 1.4)
-            fill(encoder, ring: lms.outerLips, value: 0.0, inflate: 1.1)
-        }
+        body(encoder)
         encoder.endEncoding()
-
-        // Soften edges: blur maskA -> maskB (h) -> maskA (v), ending in maskA.
-        let mw = Float(maskA.width), mh = Float(maskA.height)
-        blur(commandBuffer, source: maskA, target: maskB, dir: SIMD2<Float>(2 / mw, 0))
-        blur(commandBuffer, source: maskB, target: maskA, dir: SIMD2<Float>(0, 2 / mh))
     }
 
     private func fill(_ encoder: MTLRenderCommandEncoder,
@@ -356,6 +427,70 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(buf, offset: 0, index: 0)
         encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: verts.count)
+    }
+
+    /// Face-reshape warp outputTex -> finalTex. Computes per-face nose/jaw/eye
+    /// centres exactly like Android's FaceReshapePass, then runs the warp shader.
+    /// With no reshape active it degrades to a plain blit.
+    private func renderReshape(_ commandBuffer: MTLCommandBuffer, faces: [FaceLandmarks]) {
+        let aspect = Float(viewWidth) / Float(max(viewHeight, 1))
+        var faceCount = 0
+        var eyeCount = 0
+        let reshapesActive = eyeEnlarge > 0 || noseSlim > 0 || faceSlim > 0
+
+        if reshapesActive {
+            for f in faces {
+                if faceCount >= Self.maxFaces { break }
+                let (le, leR) = ringCenterVis(f.leftEye)
+                let (re, reR) = ringCenterVis(f.rightEye)
+                let dx = (le.x - re.x) * aspect
+                let dy = le.y - re.y
+                let scale = (dx * dx + dy * dy).squareRoot()
+
+                reMidX[faceCount] = (le.x + re.x) / 2
+                reNoseC[faceCount] = SIMD2<Float>(visX(f.noseCenter), visY(f.noseCenter))
+                reNoseR[faceCount] = scale * 0.42
+
+                // Jaw from the face-oval extremes (cheeks = x extremes, chin =
+                // lowest y). Android reads CHEEK_LEFT/RIGHT + CHIN rings.
+                if let cheekL = f.faceOval.min(by: { $0.x < $1.x }),
+                   let cheekR = f.faceOval.max(by: { $0.x < $1.x }),
+                   let chin = f.faceOval.max(by: { $0.y < $1.y }) {
+                    let jcx = (visX(cheekL) + visX(cheekR)) / 2
+                    let cheekY = (visY(cheekL) + visY(cheekR)) / 2
+                    let chinY = visY(chin)
+                    reJawC[faceCount] = SIMD2<Float>(jcx, cheekY + (chinY - cheekY) * 0.45)
+                    reJawR[faceCount] = scale * 1.25
+                } else {
+                    reJawC[faceCount] = SIMD2<Float>(reMidX[faceCount], reNoseC[faceCount].y)
+                    reJawR[faceCount] = 0
+                }
+                faceCount += 1
+
+                if eyeEnlarge > 0 {
+                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = le; reEyeR[eyeCount] = leR; eyeCount += 1 }
+                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = re; reEyeR[eyeCount] = reR; eyeCount += 1 }
+                }
+            }
+        }
+
+        // Nose/jaw uniforms only feed the shader when those warps are active.
+        let faceN = (noseSlim > 0 || faceSlim > 0) ? faceCount : 0
+
+        renderFullscreen(commandBuffer, target: finalTex, pipeline: reshapePipeline, clear: false) { encoder in
+            var sc = ReshapeScalars(aspect: aspect, faceCount: Int32(faceN),
+                                    eyeCount: Int32(eyeCount), nose: clamp01(noseSlim),
+                                    slim: clamp01(faceSlim), eye: clamp01(eyeEnlarge))
+            encoder.setFragmentTexture(outputTex, index: 0)
+            encoder.setFragmentBytes(&sc, length: MemoryLayout<ReshapeScalars>.stride, index: 0)
+            encoder.setFragmentBytes(&reMidX, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 1)
+            encoder.setFragmentBytes(&reNoseC, length: Self.maxFaces * MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            encoder.setFragmentBytes(&reNoseR, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 3)
+            encoder.setFragmentBytes(&reJawC, length: Self.maxFaces * MemoryLayout<SIMD2<Float>>.stride, index: 4)
+            encoder.setFragmentBytes(&reJawR, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 5)
+            encoder.setFragmentBytes(&reEyes, length: Self.maxEyes * MemoryLayout<SIMD2<Float>>.stride, index: 6)
+            encoder.setFragmentBytes(&reEyeR, length: Self.maxEyes * MemoryLayout<Float>.stride, index: 7)
+        }
     }
 
     private func drawMustache(_ commandBuffer: MTLCommandBuffer, _ lms: FaceLandmarks) {
@@ -396,7 +531,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let byteLength = verts.count * MemoryLayout<SpriteVertex>.stride
         guard let buf = device.makeBuffer(bytes: verts, length: byteLength, options: .storageModeShared) else { return }
 
-        loadEncoder(commandBuffer, target: outputTex) { encoder in
+        loadEncoder(commandBuffer, target: finalTex) { encoder in
             encoder.setRenderPipelineState(spritePipeline)
             encoder.setVertexBuffer(buf, offset: 0, index: 0)
             encoder.setFragmentTexture(mustacheTex, index: 0)
@@ -416,7 +551,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var pointSize = max(Float(viewWidth) * 0.012, 4)
         var color = SIMD4<Float>(0.15, 1.0, 0.55, 1.0)
 
-        loadEncoder(commandBuffer, target: outputTex) { encoder in
+        loadEncoder(commandBuffer, target: finalTex) { encoder in
             encoder.setRenderPipelineState(pointPipeline)
             encoder.setVertexBuffer(buf, offset: 0, index: 0)
             encoder.setVertexBytes(&pointSize, length: MemoryLayout<Float>.stride, index: 1)
@@ -426,7 +561,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     /// A render pass that preserves the target's existing contents (loadAction
-    /// .load) so overlays composite on top of the composited frame.
+    /// .load) so overlays composite on top of the reshaped frame.
     private func loadEncoder(_ commandBuffer: MTLCommandBuffer,
                              target: MTLTexture,
                              body: (MTLRenderCommandEncoder) -> Void) {
@@ -446,20 +581,41 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var uv: SIMD2<Float>
     }
 
+    private func clamp01(_ v: Float) -> Float { max(0, min(1, v)) }
+
     /// Landmark (display-normalized, y-down) -> clip-space NDC (y-up), through
-    /// the visible crop. Mirrors Android's toNdcX/toNdcY.
+    /// the visible crop. Mirrors Android's ndcX/ndcY.
     private func toNdc(_ p: CGPoint) -> SIMD2<Float> {
-        let sx = (Float(p.x) - cropOffX) / cropScaleX
-        let sy = (Float(p.y) - cropOffY) / cropScaleY
-        return SIMD2<Float>(2 * sx - 1, 1 - 2 * sy)
+        SIMD2<Float>(2 * visX(p) - 1, 1 - 2 * visY(p))
     }
 
-    // Landmark -> visible view pixels (y-down). Mirrors Android's px/py.
-    private func pxX(_ p: CGPoint) -> CGFloat {
-        CGFloat((Float(p.x) - cropOffX) / cropScaleX) * CGFloat(viewWidth)
-    }
-    private func pxY(_ p: CGPoint) -> CGFloat {
-        CGFloat((Float(p.y) - cropOffY) / cropScaleY) * CGFloat(viewHeight)
+    // Landmark -> visible-normalized coords (0..1, y-down) inside the crop.
+    // Same space as the fullscreen uv, so reshape centres use these directly.
+    private func visX(_ p: CGPoint) -> Float { (Float(p.x) - cropOffX) / cropScaleX }
+    private func visY(_ p: CGPoint) -> Float { (Float(p.y) - cropOffY) / cropScaleY }
+
+    // Landmark -> visible view pixels (y-down). Mirrors Android's pixelX/pixelY.
+    private func pxX(_ p: CGPoint) -> CGFloat { CGFloat(visX(p)) * CGFloat(viewWidth) }
+    private func pxY(_ p: CGPoint) -> CGFloat { CGFloat(visY(p)) * CGFloat(viewHeight) }
+
+    /// Returns a ring's centre in visible-normalized coords (y-down) plus its
+    /// aspect-corrected radius, matching Android FaceReshapePass.ringCenter
+    /// (radius = half x-span * aspect * 1.7).
+    private func ringCenterVis(_ ring: [CGPoint]) -> (SIMD2<Float>, Float) {
+        guard !ring.isEmpty else { return (SIMD2<Float>(0, 0), 0) }
+        var cx: Float = 0, cy: Float = 0
+        var minX = Float.greatestFiniteMagnitude, maxX = -Float.greatestFiniteMagnitude
+        for p in ring {
+            let vx = visX(p), vy = visY(p)
+            cx += vx; cy += vy
+            if vx < minX { minX = vx }
+            if vx > maxX { maxX = vx }
+        }
+        let n = Float(ring.count)
+        cx /= n; cy /= n
+        let aspect = Float(viewWidth) / Float(max(viewHeight, 1))
+        let r = (maxX - minX) / 2 * aspect * 1.7
+        return (SIMD2<Float>(cx, cy), r)
     }
 
     /// Triangle-list fan around the ring centroid (Metal has no triangle-fan
@@ -515,6 +671,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private func allocateTargets() {
         sceneTex = makeTarget(viewWidth, viewHeight, shared: false)
         outputTex = makeTarget(viewWidth, viewHeight, shared: false)
+        finalTex = makeTarget(viewWidth, viewHeight, shared: false)
         stagingTex = makeTarget(viewWidth, viewHeight, shared: true)
 
         let qw = max(viewWidth / 4, 1)
@@ -523,6 +680,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         blurB = makeTarget(qw, qh, shared: false)
         maskA = makeTarget(qw, qh, shared: false)
         maskB = makeTarget(qw, qh, shared: false)
+        maskC = makeTarget(qw, qh, shared: false)
     }
 
     private func makeTarget(_ w: Int, _ h: Int, shared: Bool) -> MTLTexture {

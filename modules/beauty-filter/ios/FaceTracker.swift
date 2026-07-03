@@ -5,9 +5,12 @@
 //  Runs Vision's VNDetectFaceLandmarksRequest on camera frames and publishes
 //  temporally-smoothed, display-oriented landmarks to the renderer.
 //
-//  This mirrors the Android FaceTracker: single face, live-stream style
-//  (one in-flight request at a time), exponential smoothing (alpha 0.55) with a
-//  staleness reset so the mask/mustache stay stable but still snap on big moves.
+//  Mirrors the Android FaceTracker: up to 5 faces (`MAX_FACES`), keep-only-latest
+//  (one in-flight request at a time), and adaptive per-point smoothing -- a low
+//  base factor takes the jitter off but the factor rises with motion so landmarks
+//  snap to the current frame on big moves instead of dragging. The smoothing
+//  state resets when the face count changes (face ordering isn't stable across
+//  that boundary), exactly like Android.
 //
 
 import Foundation
@@ -17,19 +20,22 @@ import CoreMedia
 
 final class FaceTracker {
 
-    /// Called (on an internal queue) whenever a new result is available.
-    /// Passes nil when no face is detected.
-    var onLandmarks: ((FaceLandmarks?) -> Void)?
+    /// Called (on an internal queue) whenever a new result is available. Passes
+    /// an empty array when no face is detected.
+    var onLandmarks: (([FaceLandmarks]) -> Void)?
 
     private let request: VNDetectFaceLandmarksRequest
     private let queue = DispatchQueue(label: "beautyfilter.facetracker")
     private var inFlight = false
 
-    // Temporal smoothing state.
-    private var smoothed: FaceLandmarks?
-    private var lastResultAt: CFTimeInterval = 0
-    private static let smoothingAlpha: CGFloat = 0.55
-    private static let staleResetSeconds: CFTimeInterval = 0.3
+    // Per-face smoothing state (nil until the first successful detection).
+    private var smoothed: [FaceLandmarks]?
+
+    private static let maxFaces = 5
+    // Adaptive smoothing (matches Android SMOOTHING_BASE / SMOOTHING_ADAPT): the
+    // applied fraction is base + |delta| * adapt, clamped to 1.
+    private static let smoothingBase: CGFloat = 0.6
+    private static let smoothingAdapt: CGFloat = 25
 
     init() {
         request = VNDetectFaceLandmarksRequest()
@@ -58,37 +64,44 @@ final class FaceTracker {
                 self.handleResults()
             } catch {
                 NSLog("[BeautyFilter] Vision perform failed: \(error)")
-                self.publish(nil)
+                self.smoothed = nil
+                self.publish([])
             }
         }
     }
 
     private func handleResults() {
-        guard let face = request.results?.first,
-              let fresh = FaceTopology.makeLandmarks(from: face) else {
+        let observations = request.results ?? []
+        // Largest faces first, capped at MAX_FACES, then converted to our model.
+        let fresh: [FaceLandmarks] = observations
+            .sorted { $0.boundingBox.width * $0.boundingBox.height >
+                      $1.boundingBox.width * $1.boundingBox.height }
+            .prefix(Self.maxFaces)
+            .compactMap { FaceTopology.makeLandmarks(from: $0) }
+
+        guard !fresh.isEmpty else {
             smoothed = nil
-            publish(nil)
+            publish([])
             return
         }
 
-        let now = CACurrentMediaTime()
         let prev = smoothed
-        let out: FaceLandmarks
-
-        if let prev = prev,
-           now - lastResultAt <= Self.staleResetSeconds,
-           Self.sameShape(prev, fresh) {
-            out = Self.lerp(prev, fresh, Self.smoothingAlpha)
+        let out: [FaceLandmarks]
+        if let prev = prev, prev.count == fresh.count {
+            // Same face count: smooth per face index (verbatim on a shape change).
+            out = zip(prev, fresh).map { p, f in
+                Self.sameShape(p, f) ? Self.adaptiveSmooth(p, f) : f
+            }
         } else {
+            // Face count changed -> ordering isn't stable; take the fresh frame.
             out = fresh
         }
 
         smoothed = out
-        lastResultAt = now
         publish(out)
     }
 
-    private func publish(_ landmarks: FaceLandmarks?) {
+    private func publish(_ landmarks: [FaceLandmarks]) {
         onLandmarks?(landmarks)
     }
 
@@ -107,9 +120,15 @@ final class FaceTracker {
             a.allPoints.count == b.allPoints.count
     }
 
-    private static func lerp(_ a: FaceLandmarks, _ b: FaceLandmarks, _ t: CGFloat) -> FaceLandmarks {
+    /// Adaptive lerp from `a` toward `b`, per axis: fraction = base + |delta|*adapt.
+    private static func adaptiveSmooth(_ a: FaceLandmarks, _ b: FaceLandmarks) -> FaceLandmarks {
+        func ax(_ pc: CGFloat, _ qc: CGFloat) -> CGFloat {
+            let d = qc - pc
+            let t = min(smoothingBase + abs(d) * smoothingAdapt, 1)
+            return pc + d * t
+        }
         func lp(_ p: CGPoint, _ q: CGPoint) -> CGPoint {
-            CGPoint(x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t)
+            CGPoint(x: ax(p.x, q.x), y: ax(p.y, q.y))
         }
         func la(_ xs: [CGPoint], _ ys: [CGPoint]) -> [CGPoint] {
             zip(xs, ys).map { lp($0, $1) }
@@ -125,7 +144,8 @@ final class FaceTracker {
             noseBottom: lp(a.noseBottom, b.noseBottom),
             upperLipTop: lp(a.upperLipTop, b.upperLipTop),
             mouthLeft: lp(a.mouthLeft, b.mouthLeft),
-            mouthRight: lp(a.mouthRight, b.mouthRight)
+            mouthRight: lp(a.mouthRight, b.mouthRight),
+            noseCenter: lp(a.noseCenter, b.noseCenter)
         )
     }
 }

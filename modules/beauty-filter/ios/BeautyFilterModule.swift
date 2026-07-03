@@ -33,6 +33,30 @@ public class BeautyFilterModule: Module {
                 view.setSmoothing(Float(value ?? 0))
             }
 
+            Prop("glow") { (view: BeautyCameraView, value: Double?) in
+                view.setGlow(Float(value ?? 0))
+            }
+
+            Prop("clarity") { (view: BeautyCameraView, value: Double?) in
+                view.setClarity(Float(value ?? 0))
+            }
+
+            Prop("warmth") { (view: BeautyCameraView, value: Double?) in
+                view.setWarmth(Float(value ?? 0))
+            }
+
+            Prop("eyeEnlarge") { (view: BeautyCameraView, value: Double?) in
+                view.setEyeEnlarge(Float(value ?? 0))
+            }
+
+            Prop("noseSlim") { (view: BeautyCameraView, value: Double?) in
+                view.setNoseSlim(Float(value ?? 0))
+            }
+
+            Prop("faceSlim") { (view: BeautyCameraView, value: Double?) in
+                view.setFaceSlim(Float(value ?? 0))
+            }
+
             Prop("mustache") { (view: BeautyCameraView, enabled: Bool?) in
                 view.setMustache(enabled == true)
             }

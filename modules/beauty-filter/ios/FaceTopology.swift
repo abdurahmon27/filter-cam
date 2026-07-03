@@ -52,6 +52,11 @@ struct FaceLandmarks {
     var upperLipTop: CGPoint
     var mouthLeft: CGPoint
     var mouthRight: CGPoint
+
+    // Reshape (liquify) anchor: the centre of the nose region. The eye and jaw
+    // centres the renderer needs are derived from `leftEye`/`rightEye`/`faceOval`
+    // (see MetalRenderer), mirroring how Android's FaceReshapePass reads its rings.
+    var noseCenter: CGPoint
 }
 
 enum FaceTopology {
@@ -98,6 +103,9 @@ enum FaceTopology {
         // subnasale landmark, so this is intentionally coarse.
         let noseBottom = nose.max(by: { $0.y < $1.y })
             ?? CGPoint(x: upperLipTop.x, y: upperLipTop.y - 0.03)
+        // Reshape nose centre: centroid of the nose region (Android uses NOSE_TIP).
+        let noseCenter = centroid(nose)
+            ?? CGPoint(x: upperLipTop.x, y: upperLipTop.y - 0.06)
 
         return FaceLandmarks(
             faceOval: faceOval,
@@ -110,8 +118,18 @@ enum FaceTopology {
             noseBottom: noseBottom,
             upperLipTop: upperLipTop,
             mouthLeft: mouthLeft,
-            mouthRight: mouthRight
+            mouthRight: mouthRight,
+            noseCenter: noseCenter
         )
+    }
+
+    /// Average of a set of points (nil when empty).
+    private static func centroid(_ pts: [CGPoint]) -> CGPoint? {
+        guard !pts.isEmpty else { return nil }
+        var sx: CGFloat = 0, sy: CGFloat = 0
+        for p in pts { sx += p.x; sy += p.y }
+        let n = CGFloat(pts.count)
+        return CGPoint(x: sx / n, y: sy / n)
     }
 
     /// Synthesizes a closed skin polygon. `faceContour` covers the lower face
