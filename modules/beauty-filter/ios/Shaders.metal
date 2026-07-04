@@ -129,11 +129,18 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     outColor += (outColor - low) * (u.sharp * 0.35 * (1.0 - skin * 0.8));
     outColor = clamp(outColor, 0.0, 1.0);
 
-    // --- Glow (bloom): screen-blend the blurred scene's own soft highlights
-    // over the WHOLE frame (port of Android). Light spreads where light
-    // already exists, so there is no geometric boundary to see. ---
-    float3 hl = clamp((low - 0.45) / 0.55, 0.0, 1.0);
-    outColor = 1.0 - (1.0 - outColor) * (1.0 - hl * (u.glow * 0.30));
+    // --- Glow (bloom): screen-blend the blurred scene's own soft highlights,
+    // but ONLY onto pixels that are already lit (bloomGuard): the blur of a
+    // bright background bleeds over dark subjects (black shirt, hair) and
+    // screen-lifting them read as a milky fog over the whole frame — the
+    // guard keeps blacks dense while light still spreads across walls/skin
+    // like real optics.
+    // iOS-ONLY TUNING (Android keeps knee 0.45 / strength 0.30, no guard):
+    // the iPhone front camera delivers a flatter, brighter feed, so identical
+    // constants read washed-out here — see ios-android-parity notes. ---
+    float3 hl = clamp((low - 0.50) / 0.50, 0.0, 1.0);
+    float bloomGuard = smoothstep(0.10, 0.45, dot(outColor, LUMA));
+    outColor = 1.0 - (1.0 - outColor) * (1.0 - hl * (u.glow * 0.26 * bloomGuard));
 
     // --- Warmth: soft global grade, faded out on dark pixels so hair/brows/
     // beard keep their true colour. ---
@@ -149,9 +156,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
                   * smoothstep(0.0, 0.06, outColor.g - outColor.b)
                   * smoothstep(0.15, 0.40, wLuma);
-    float3 pale = mix(outColor, float3(wLuma), 0.70);
-    pale += (float3(1.0) - pale) * 0.24;
-    outColor = mix(outColor, pale, u.glow * 1.0 * skinHue);
+    // iOS-ONLY TUNING (Android keeps 0.70/0.24/1.0): on the iPhone's flatter
+    // feed, full desaturation read GRAY next to the reference apps (their
+    // skin stays warm-neutral); this keeps the porcelain lift without
+    // flattening.
+    float3 pale = mix(outColor, float3(wLuma), 0.55);
+    pale += (float3(1.0) - pale) * 0.16;
+    outColor = mix(outColor, pale, u.glow * 0.7 * skinHue);
     // A small multiplicative gain on the same skin-toned pixels keeps the face
     // reading bright and lit without shifting its (already matched) colour —
     // gain preserves hue/sat where a white-mix pales. Glow-gated like the rest
@@ -190,10 +201,12 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // deepest tones; anything earlier gets re-lifted). Pulls sub-0.35-luma
     // tones toward true black so hair, brows, beard and pupils read dense.
     // Skin sits well above the toe, so the face brightness/whitening is
-    // untouched. sharp-driven (up to 25% at full). Pure ALU in this same
-    // pass — no extra texture reads, no performance cost. ---
+    // untouched. sharp-driven (up to 35% at full — iOS-ONLY TUNING, Android
+    // keeps 25%: the iPhone's flatter feed needs the stronger toe for the
+    // reference-app black density). Pure ALU in this same pass — no extra
+    // texture reads, no performance cost. ---
     float toeL = dot(outColor, LUMA);
-    outColor *= 1.0 - 0.25 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
+    outColor *= 1.0 - 0.35 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
