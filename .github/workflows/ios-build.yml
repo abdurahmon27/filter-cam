@@ -19,9 +19,17 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-latest
+    # Expo 57 needs Swift 6.2+ (Xcode 26); macos-latest still defaults to older Xcode
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
 
       - uses: actions/setup-node@v4
         with:
