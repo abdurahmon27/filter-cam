@@ -159,8 +159,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func buildPipelines() throws {
-        // Shaders.metal is compiled into the pod's default.metallib.
-        let library = try device.makeDefaultLibrary(bundle: Bundle(for: MetalRenderer.self))
+        let library = try makeShaderLibrary()
 
         func fn(_ name: String) throws -> MTLFunction {
             guard let f = library.makeFunction(name: name) else {
@@ -212,6 +211,36 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private enum BlendMode { case none, premultiplied, straightAlpha }
+
+    /// Loads the shader library without assuming HOW the pod was built: a
+    /// precompiled default.metallib is used when one exists (pod bundle, then
+    /// app bundle), otherwise the Shaders.metal SOURCE that the podspec ships
+    /// as a resource is compiled at runtime (~100ms, once). A static pod
+    /// target does not reliably produce a metallib — loading one blindly is
+    /// how the preview black-screened: library load threw, init? returned
+    /// nil, and the camera session never started.
+    private func makeShaderLibrary() throws -> MTLLibrary {
+        // A metallib is only "ours" if it holds our entry points — the app (or
+        // another pod) may ship its own default.metallib.
+        let probe = "fullscreen_vertex"
+        if let lib = try? device.makeDefaultLibrary(bundle: Bundle(for: MetalRenderer.self)),
+           lib.makeFunction(name: probe) != nil {
+            return lib
+        }
+        if let lib = device.makeDefaultLibrary(), lib.makeFunction(name: probe) != nil {
+            return lib
+        }
+        for bundle in [Bundle(for: MetalRenderer.self), Bundle.main] {
+            if let url = bundle.url(forResource: "Shaders", withExtension: "metal"),
+               let source = try? String(contentsOf: url, encoding: .utf8) {
+                return try device.makeLibrary(source: source, options: nil)
+            }
+        }
+        throw NSError(domain: "BeautyFilter", code: 1, userInfo: [
+            NSLocalizedDescriptionKey:
+                "no default.metallib and no Shaders.metal resource in any bundle"
+        ])
+    }
 
     // MARK: - Inputs
 

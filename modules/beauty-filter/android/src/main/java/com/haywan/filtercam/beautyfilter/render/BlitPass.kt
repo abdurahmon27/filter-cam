@@ -15,7 +15,7 @@ import com.haywan.filtercam.beautyfilter.gl.Shaders
 internal class BlitPass {
     private val program = GlUtils.buildProgram(Shaders.FULLSCREEN_VS, Shaders.SHARPEN_FS)
 
-    fun draw(texture: Int, srcWidth: Int, srcHeight: Int, quad: ScreenQuad, sharp: Float = 0f) {
+    fun draw(texture: Int, srcWidth: Int, srcHeight: Int, quad: ScreenQuad, sharp: Float) {
         GLES20.glUseProgram(program)
         quad.bind(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)

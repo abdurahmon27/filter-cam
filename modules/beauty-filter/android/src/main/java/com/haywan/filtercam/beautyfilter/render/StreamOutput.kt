@@ -57,7 +57,7 @@ internal class StreamOutput(surface: Surface) {
         presentationTimeNs: Long,
         blit: BlitPass,
         quad: ScreenQuad,
-        sharp: Float = 0f,
+        sharp: Float,
     ) {
         val prevDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
         val prevRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)

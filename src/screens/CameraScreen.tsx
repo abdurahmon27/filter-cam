@@ -1,4 +1,10 @@
-import { useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   ActivityIndicator,
   LayoutAnimation,
@@ -75,8 +81,21 @@ export default function CameraScreen({ onClose }: Props) {
   const [faceMesh, setFaceMesh] = useState(false);
   const [carouselOpen, setCarouselOpen] = useState(true);
   const [framing, setFraming] = useState<Framing>('3:5');
-  const [fps, setFps] = useState<number | null>(null);
   const nativeCameraRef = useRef<BeautyCameraViewRef>(null);
+
+  // The ~1/s fps events flow through a ref into the FpsPill child, so only
+  // the pill re-renders — not this whole screen (native camera view included).
+  const fpsListener = useRef<((fps: number) => void) | null>(null);
+  const onFps = useCallback(
+    (e: { nativeEvent: { fps: number } }) => fpsListener.current?.(e.nativeEvent.fps),
+    []
+  );
+  const registerFpsListener = useCallback(
+    (fn: ((fps: number) => void) | null) => {
+      fpsListener.current = fn;
+    },
+    []
+  );
 
   const useNativeCamera = isBeautyCameraAvailable && BeautyCameraView != null;
   const beautyActive = Object.values(intensities).some((v) => v > 0.01);
@@ -149,7 +168,7 @@ export default function CameraScreen({ onClose }: Props) {
               faceSlim={intensities.slim}
               mustache={mustache}
               faceMesh={faceMesh}
-              onFps={(e) => setFps(e.nativeEvent.fps)}
+              onFps={onFps}
             />
           ) : (
             <>
@@ -161,10 +180,8 @@ export default function CameraScreen({ onClose }: Props) {
         </View>
 
         {/* FPS indicator (native camera only) */}
-        {useNativeCamera && fps != null && (
-          <View style={[styles.fpsPill, { top: insets.top + 64 }]}>
-            <Text style={styles.fpsText}>{fps} FPS</Text>
-          </View>
+        {useNativeCamera && (
+          <FpsPill register={registerFpsListener} top={insets.top + 64} />
         )}
 
         {/* Top glass controls */}
@@ -218,6 +235,31 @@ export default function CameraScreen({ onClose }: Props) {
           setCarouselOpen((o) => !o);
         }}
       />
+    </View>
+  );
+}
+
+/**
+ * Self-contained fps badge: subscribes to the fps stream via [register] and
+ * holds the per-second state itself, so the ~1/s updates re-render only this
+ * 20px pill instead of the whole camera screen.
+ */
+function FpsPill({
+  register,
+  top,
+}: {
+  register: (fn: ((fps: number) => void) | null) => void;
+  top: number;
+}) {
+  const [fps, setFps] = useState<number | null>(null);
+  useEffect(() => {
+    register(setFps);
+    return () => register(null);
+  }, [register]);
+  if (fps == null) return null;
+  return (
+    <View style={[styles.fpsPill, { top }]}>
+      <Text style={styles.fpsText}>{fps} FPS</Text>
     </View>
   );
 }

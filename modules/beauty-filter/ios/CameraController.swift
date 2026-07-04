@@ -75,10 +75,12 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     private func configureSession() {
         session.beginConfiguration()
-        // .inputPriority so the device's activeFormat (set below) wins; the
-        // old .photo preset delivered full-sensor 4:3 (~12MP) frames, far
-        // heavier than needed and mismatched with Android's 1440x1080.
-        session.sessionPreset = .inputPriority
+        // Baseline 4:3 preset (also the fallback when no explicit format
+        // matches below). NEVER assign .inputPriority yourself — AVFoundation
+        // forbids setting it directly and the session ends up delivering no
+        // frames (black preview); it switches to .inputPriority on its own
+        // when configureFormat sets the device's activeFormat.
+        session.sessionPreset = .photo
 
         if let existing = currentInput {
             session.removeInput(existing)
@@ -97,20 +99,23 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             currentInput = input
         }
 
-        configureFormat(device)
-
         if session.outputs.isEmpty, session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
         }
 
         applyOrientation()
         session.commitConfiguration()
+
+        // AFTER the commit: committing a session configuration re-applies the
+        // preset's own format, which would override an activeFormat set inside
+        // the begin/commit window.
+        configureFormat(device)
     }
 
     /// Pick the smallest 4:3 format at least 1440 wide at 30fps — parity with
     /// Android's 1440x1080 (the 4:3 sibling of 720p): sharp on a phone screen,
-    /// half the copy/detect cost of full-sensor frames. Falls back to the
-    /// session default when no such format exists.
+    /// half the copy/detect cost of full-sensor frames. When no such format
+    /// exists the session simply stays on the .photo preset (full-sensor 4:3).
     private func configureFormat(_ device: AVCaptureDevice) {
         var best: AVCaptureDevice.Format?
         var bestWidth = Int32.max
@@ -126,14 +131,17 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             }
         }
         guard let format = best else {
-            NSLog("[BeautyFilter] no 4:3 >=1440-wide format; using session default")
+            NSLog("[BeautyFilter] no 4:3 >=1440-wide format; staying on .photo")
             return
         }
         do {
             try device.lockForConfiguration()
-            device.activeFormat = format
+            device.activeFormat = format // session flips itself to .inputPriority
+            // Cap the rate at 30fps but leave the max frame duration alone:
+            // pinning both forbids AVFoundation from extending exposure in low
+            // light (slower capture, brighter frames), which the stock camera
+            // and the Android path both allow.
             device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
         } catch {
             NSLog("[BeautyFilter] lockForConfiguration failed: \(error.localizedDescription)")

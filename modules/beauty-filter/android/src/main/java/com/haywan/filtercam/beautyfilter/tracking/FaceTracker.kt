@@ -60,9 +60,18 @@ internal class FaceTracker(
     @Volatile private var released = false
 
     /** Frames waiting for their detection result, keyed by submit timestamp. */
-    private class PendingFrame(val full: Bitmap, val rotation: Int, val mirror: Boolean)
+    private class PendingFrame(
+        val full: Bitmap,
+        val detectBmp: Bitmap,
+        val rotation: Int,
+        val mirror: Boolean,
+    )
     private val pendingLock = Any()
     private val pending = TreeMap<Long, PendingFrame>()
+
+    // Last delivered landmarks — what a frame is displayed with when its own
+    // detection errors out (never freeze the preview over a detector failure).
+    @Volatile private var lastFaces: Array<FloatArray> = emptyArray()
 
     // Analysis-thread-only.
     private var lastTimestampMs = 0L
@@ -102,7 +111,7 @@ internal class FaceTracker(
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.LIVE_STREAM)
             .setResultListener(::onResult)
-            .setErrorListener { e -> Log.w(TAG, "detect error", e) }
+            .setErrorListener(::onError)
             .setNumFaces(MAX_FACES)
             .setMinFaceDetectionConfidence(0.5f)
             // Below the defaults so partial occlusion (a finger on the face) or
@@ -160,23 +169,40 @@ internal class FaceTracker(
             val ts = if (t2 <= lastTimestampMs) lastTimestampMs + 1 else t2
             lastTimestampMs = ts
 
+            // Backstop against silent drops (a broken pipeline that neither
+            // results nor errors): entries this old will never get a callback.
+            // Deliver them with the last known landmarks — a live, possibly
+            // unfiltered preview always beats a frozen one — which also frees
+            // their in-flight slots so new frames keep flowing.
+            val staleCutoff = ts - PENDING_TIMEOUT_MS
+            val stale = ArrayList<PendingFrame>(0)
+            synchronized(pendingLock) {
+                while (pending.isNotEmpty() && pending.firstKey() < staleCutoff) {
+                    stale.add(pending.pollFirstEntry().value)
+                }
+            }
+            for (f in stale) onFrame(f.full, f.rotation, f.mirror, lastFaces)
+
             synchronized(pendingLock) {
                 if (pending.size >= MAX_IN_FLIGHT) {
                     // MediaPipe is saturated: drop THIS frame (keep-only-latest
                     // would starve the frames already inside the pipeline).
                     pool.release(src)
+                    detectBmp.recycle()
                     return
                 }
-                pending[ts] = PendingFrame(src, rotation, mirror)
+                pending[ts] = PendingFrame(src, detectBmp, rotation, mirror)
             }
             try {
-                // NOTE: detectBmp is intentionally NOT recycled — MediaPipe may
-                // still read it asynchronously (and skipped frames never get a
-                // callback). It is small; GC handles it.
+                // detectBmp is reclaimed in onResult once a result at or past
+                // its timestamp proves MediaPipe is done reading it.
                 landmarker.detectAsync(BitmapImageBuilder(detectBmp).build(), ts)
             } catch (t: Throwable) {
                 Log.w(TAG, "detectAsync failed", t)
-                synchronized(pendingLock) { pending.remove(ts) }?.let { pool.release(it.full) }
+                // Still display the frame (unfiltered preview beats a frozen
+                // one); the bitmap MediaPipe may have seen is left to the GC.
+                val f = synchronized(pendingLock) { pending.remove(ts) }
+                if (f != null) onFrame(f.full, f.rotation, f.mirror, lastFaces)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "analyze failed", t)
@@ -199,6 +225,10 @@ internal class FaceTracker(
             while (it.hasNext()) {
                 val e = it.next()
                 if (e.key > ts) break
+                // A result at `ts` proves the serial pipeline is done with
+                // every input at or before it — their detect bitmaps are
+                // safely reclaimable now.
+                e.value.detectBmp.recycle()
                 if (e.key < ts) pool.release(e.value.full) else frame = e.value
                 it.remove()
             }
@@ -224,25 +254,64 @@ internal class FaceTracker(
         }
 
         val faces = smoothAndHold(result, now, ts / 1000.0)
+        lastFaces = faces
         onFrame(f.full, f.rotation, f.mirror, faces)
     }
 
     /**
+     * A detector error means the frames in flight will never get a result —
+     * the old synchronous path's invariant was "every frame displays, filtered
+     * or not", and this keeps it: deliver everything pending with the last
+     * known landmarks so the preview stays live through a failing detector
+     * (their detect bitmaps are left to the GC — MediaPipe's state is unknown
+     * mid-error).
+     */
+    private fun onError(e: RuntimeException) {
+        Log.w(TAG, "detect error", e)
+        val stranded = ArrayList<PendingFrame>(MAX_IN_FLIGHT)
+        synchronized(pendingLock) {
+            stranded.addAll(pending.values)
+            pending.clear()
+        }
+        if (released) {
+            for (f in stranded) pool.release(f.full)
+            return
+        }
+        for (f in stranded) onFrame(f.full, f.rotation, f.mirror, lastFaces)
+    }
+
+    // Reused packing scratch for row-padded camera buffers (analysis thread only).
+    private var packScratch: java.nio.ByteBuffer? = null
+
+    /**
      * RGBA copy of the proxy into a pooled bitmap — the androidx `toBitmap()`
      * allocates a fresh multi-MB bitmap per frame, and that GC churn is jank.
+     * Row-padded buffers (device-dependent) are packed tight through a reused
+     * scratch first, so those devices get the pool too.
      */
     private fun copyToPooledBitmap(proxy: ImageProxy): Bitmap {
         val plane = proxy.planes[0]
-        if (plane.pixelStride == 4 && plane.rowStride == proxy.width * 4) {
-            val bmp = pool.acquire(proxy.width, proxy.height)
-            val buf = plane.buffer
-            buf.rewind()
+        val w = proxy.width
+        val h = proxy.height
+        val bmp = pool.acquire(w, h)
+        val buf = plane.buffer
+        buf.rewind()
+        val tightRow = w * 4
+        if (plane.pixelStride == 4 && plane.rowStride == tightRow) {
             bmp.copyPixelsFromBuffer(buf)
             return bmp
         }
-        // Row-padded buffer (device-dependent): fall back to the allocating
-        // copy. The pool accepts these on release, so it still stabilizes.
-        return proxy.toBitmap()
+        val scratch = packScratch?.takeIf { it.capacity() >= tightRow * h }
+            ?: java.nio.ByteBuffer.allocateDirect(tightRow * h).also { packScratch = it }
+        scratch.clear()
+        for (y in 0 until h) {
+            buf.limit(y * plane.rowStride + tightRow)
+            buf.position(y * plane.rowStride)
+            scratch.put(buf)
+        }
+        scratch.rewind()
+        bmp.copyPixelsFromBuffer(scratch)
+        return bmp
     }
 
     /**
@@ -361,6 +430,11 @@ internal class FaceTracker(
         // 2 lets its detector/landmark stages overlap (the throughput win);
         // more just adds latency and memory.
         private const val MAX_IN_FLIGHT = 2
+
+        // A pending frame older than this will never get a callback (broken
+        // pipeline that neither results nor errors); it is delivered with the
+        // last known landmarks instead so the preview can never freeze.
+        private const val PENDING_TIMEOUT_MS = 500L
 
         // Detection input long-side. Landmarks are normalized, so this can be well
         // below the display resolution — keeps detection cheap without hurting

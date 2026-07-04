@@ -24,6 +24,11 @@ Pod::Spec.new do |s|
   }
 
   s.source_files = '**/*.{h,m,mm,swift}'
-  # The .metal shader source is compiled into a default.metallib at build time.
+  # Shaders.metal ships as a SOURCE resource (copied into the app bundle by
+  # the Pods resources phase). MetalRenderer first looks for a precompiled
+  # default.metallib and otherwise compiles this source at runtime — a static
+  # pod target does not reliably produce/ship a metallib, and loading one that
+  # does not exist is a silent black-screen (renderer init fails, the camera
+  # session never starts).
   s.resources = '**/*.metal'
 end
