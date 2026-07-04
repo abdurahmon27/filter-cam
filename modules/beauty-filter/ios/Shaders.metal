@@ -99,25 +99,33 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float face   = faceTex.sample(s, in.uv).r;
 
     // --- Edge-aware skin smoothing (frequency separation) ---
+    // iOS-ONLY TUNING (Android keeps floor 0.28): a lower flat-skin keep so
+    // blotches/redness texture clean up harder at the same slider — the
+    // reference apps' complexion is more uniform than the iPhone's sharper,
+    // flatter feed leaves it at Android's floor. Edges keep full detail.
     float3 high = scene - low;
     float amp = length(high);
     float edge = smoothstep(0.055, 0.22, amp);
-    float keep = mix(0.28, 1.0, edge);
+    float keep = mix(0.22, 1.0, edge);
     float3 smoothed = low + high * keep;
     float3 c = mix(scene, smoothed, u.smooth * skin);
 
     // --- Clarity: even skin colour toward local tone at constant luma, then a
-    // touch more saturation so skin stays warm/alive rather than gray. ---
+    // touch more saturation so skin stays warm/alive rather than gray.
+    // iOS-ONLY TUNING (Android keeps 0.5): stronger tone-evening for the
+    // reference look's uniform complexion (red patches, under-eye). ---
     float cl = dot(c, LUMA);
     float3 localTone = low + (cl - dot(low, LUMA));
-    c = mix(c, localTone, u.clarity * skin * 0.5);
+    c = mix(c, localTone, u.clarity * skin * 0.7);
     float sl = dot(c, LUMA);
     c = mix(float3(sl), c, 1.0 + u.clarity * face * 0.08);
 
     // --- Glow (in-mask part): only a faint skin whitening lives inside the
     // face gate; the visible glow is the GLOBAL bloom below. A flat brightness
-    // lift here reads as a bright oval "layer" at the mask boundary. ---
-    c += (float3(1.0) - c) * (u.glow * skin * 0.05);
+    // lift here reads as a bright oval "layer" at the mask boundary.
+    // iOS-ONLY TUNING (Android keeps 0.05): a touch more in-face lift to match
+    // the reference's brighter, more even face. ---
+    c += (float3(1.0) - c) * (u.glow * skin * 0.07);
 
     c = clamp(c, 0.0, 1.0);
     float3 outColor = mix(scene, c, face);
