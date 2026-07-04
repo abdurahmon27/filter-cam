@@ -132,7 +132,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // scene, gated OFF smoothed skin — hair strands, eyes, brows and the
     // background gain crisp definition while the retouched skin stays clean.
     // Runs before bloom/warmth so those global grades are not re-amplified. ---
-    outColor += (outColor - low) * (u.sharp * 0.35 * (1.0 - skin * 0.8));
+    // iOS-ONLY TUNING (Android keeps 0.35): softer structure boost — the
+    // iPhone feed is already crisp, and the full boost etched lashes/brows
+    // into a hard, drawn-on outline.
+    outColor += (outColor - low) * (u.sharp * 0.28 * (1.0 - skin * 0.8));
     outColor = clamp(outColor, 0.0, 1.0);
 
     // --- Glow (bloom): screen-blend the blurred scene's own soft highlights,
@@ -186,9 +189,11 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     outColor = mix(float3(gL), outColor, 1.0 + u.sharp * 0.25);
 
     // --- Sharp (rich colour): deepen the shadows so dark hair, brows and
-    // beard read dense and truly dark instead of lifted/washed. ---
+    // beard read dense and truly dark instead of lifted/washed.
+    // iOS-ONLY TUNING (Android keeps 0.14): trimmed — together with the toe
+    // it was blackening lashes/brows into an eyeliner look. ---
     float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
-    outColor *= 1.0 - u.sharp * 0.14 * shadow;
+    outColor *= 1.0 - u.sharp * 0.10 * shadow;
 
     // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot re-add
     // the warm cast the fair-skin grade removed. Trims the red-over-green
@@ -221,6 +226,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
 
 // Final present with a light unsharp-mask sharpen -- port of Android SHARPEN_FS.
 // texel = (1/srcWidth, 1/srcHeight); amount = strength.
+// iOS-ONLY TUNING (Android has no gate): the difference signal is soft-gated
+// so sub-~2%-amplitude detail — sensor noise on flat skin (the grainy nose) —
+// is NOT amplified, while real edges (lashes, hair, features) pass through in
+// full. A plain unsharp mask boosts noise and edges alike.
 fragment float4 sharpen_fragment(FSOut in [[stage_in]],
                                  texture2d<float> tex [[texture(0)]],
                                  constant float2 &texel [[buffer(0)]],
@@ -233,7 +242,9 @@ fragment float4 sharpen_fragment(FSOut in [[stage_in]],
         tex.sample(s, in.uv + float2(0.0, texel.y)).rgb +
         tex.sample(s, in.uv - float2(0.0, texel.y)).rgb
     ) * 0.25;
-    c = c + (c - blur) * amount;
+    float3 delta = c - blur;
+    float gate = smoothstep(0.004, 0.02, length(delta));
+    c = c + delta * (amount * gate);
     return float4(clamp(c, 0.0, 1.0), 1.0);
 }
 

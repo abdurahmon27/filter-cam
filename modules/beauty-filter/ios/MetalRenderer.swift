@@ -406,8 +406,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func bindSharpen(_ encoder: MTLRenderCommandEncoder, source: MTLTexture) {
         var texel = SIMD2<Float>(1 / Float(max(source.width, 1)), 1 / Float(max(source.height, 1)))
-        // Matches Android BlitPass: SHARPEN_BASE + sharp * SHARPEN_RANGE.
-        var amount: Float = 0.85 + clamp01(sharpness) * 0.75
+        // iOS-ONLY TUNING (Android keeps 0.85 + sharp * 0.75): Android's big
+        // base exists because it UPSCALES the frame to the screen and needs
+        // acutance restored; on iOS the 1440-wide capture DOWNSCALES to the
+        // display, so the same base over-etches (drawn-on eyelashes) and
+        // re-amplifies sensor noise (grainy nose).
+        var amount: Float = 0.35 + clamp01(sharpness) * 0.55
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentBytes(&texel, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
         encoder.setFragmentBytes(&amount, length: MemoryLayout<Float>.stride, index: 1)
