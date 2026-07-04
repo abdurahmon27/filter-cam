@@ -1,0 +1,61 @@
+# Builds an UNSIGNED iOS .ipa on GitHub's free macOS runners.
+# Download the artifact and sideload it from Linux with:
+#   xtool install FilterCam-unsigned.ipa
+# (xtool signs it with your free Apple ID during install.)
+name: iOS build (unsigned ipa)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "modules/**"
+      - "src/**"
+      - "App.tsx"
+      - "index.ts"
+      - "app.json"
+      - "package.json"
+      - ".github/workflows/ios-build.yml"
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Generate native iOS project (expo prebuild)
+        run: npx expo prebuild -p ios
+
+      - name: Build (Release, no code signing)
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace FilterCam.xcworkspace \
+            -scheme FilterCam \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned ipa
+        run: |
+          mkdir Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/FilterCam.app Payload/
+          zip -qry FilterCam-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FilterCam-unsigned
+          path: FilterCam-unsigned.ipa
+          retention-days: 14
