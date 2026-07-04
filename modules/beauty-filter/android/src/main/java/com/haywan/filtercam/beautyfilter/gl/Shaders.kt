@@ -19,19 +19,25 @@ internal object Shaders {
     """
 
     /**
-     * Camera pass (single-stream): the frame is a normal 2D texture uploaded from
-     * an already display-oriented bitmap. Applies the cover-crop window and flips
-     * the y axis (bitmaps are top-down, GL textures are bottom-up).
+     * Camera pass (single-stream): the frame texture holds the RAW camera buffer
+     * (un-rotated, un-mirrored — rotating the full-res bitmap on the CPU was the
+     * pipeline's fps bottleneck). Applies the cover-crop window in upright display
+     * space, then maps upright coords into buffer coords with an affine transform
+     * ([uUvX]/[uUvY], set from the frame's rotation + mirror) so the GPU does the
+     * rotation for free during sampling.
      */
     const val CAMERA_VS = """
         attribute vec2 aPos;
         attribute vec2 aUV;
-        uniform vec4 uCrop; // offset.xy, scale.xy
+        uniform vec4 uCrop; // offset.xy, scale.xy (upright space)
+        uniform vec3 uUvX;  // bufferU = dot(uUvX, vec3(uprightUV, 1))
+        uniform vec3 uUvY;  // bufferV = dot(uUvY, vec3(uprightUV, 1))
         varying vec2 vUV;
         void main() {
             gl_Position = vec4(aPos, 0.0, 1.0);
             vec2 uv = uCrop.xy + aUV * uCrop.zw;
-            vUV = vec2(uv.x, 1.0 - uv.y);
+            uv = vec2(uv.x, 1.0 - uv.y); // upright, top-down (bitmap orientation)
+            vUV = vec2(dot(uUvX, vec3(uv, 1.0)), dot(uUvY, vec3(uv, 1.0)));
         }
     """
 
@@ -93,6 +99,10 @@ internal object Shaders {
      * uGlow     highlight bloom + skin brightening (0..1)
      * uClarity  even skin tone + life (0..1)
      * uWarmth   global warm tone (0..1)
+     * uSharp    structure + rich colour (0..1) — large-radius local contrast
+     *           (hair/eyes/background definition, gated off smoothed skin),
+     *           deeper shadows and extra vibrance for the crisp, saturated
+     *           "high-quality" reference look.
      */
     const val COMPOSITE_FS = """
         precision mediump float;
@@ -105,6 +115,7 @@ internal object Shaders {
         uniform float uGlow;
         uniform float uClarity;
         uniform float uWarmth;
+        uniform float uSharp;
 
         const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 
@@ -144,6 +155,14 @@ internal object Shaders {
             c = clamp(c, 0.0, 1.0);
             vec3 outColor = mix(scene, c, face);
 
+            // --- Sharp (structure): large-radius local contrast against the
+            // blurred scene, gated OFF smoothed skin — hair strands, eyes,
+            // brows and the background gain crisp definition while the
+            // retouched skin stays clean. Runs before bloom/warmth so those
+            // global grades are not re-amplified by the difference signal. ---
+            outColor += (outColor - low) * (uSharp * 0.35 * (1.0 - skin * 0.8));
+            outColor = clamp(outColor, 0.0, 1.0);
+
             // --- Glow (bloom): screen-blend the blurred scene's own soft
             // highlights over the WHOLE frame. Light spreads where light
             // already exists — like real optics — so there is no geometric
@@ -159,12 +178,58 @@ internal object Shaders {
             float darkGuard = smoothstep(0.08, 0.35, dot(outColor, LUMA));
             outColor += vec3(0.045, 0.016, -0.026) * (uWarmth * darkGuard);
 
+            // --- Fair skin (glow-driven): pale, porcelain whitening of
+            // skin-TONED pixels across the whole frame — face, ears and neck
+            // alike, so there is no mask seam. Detects warm skin hues
+            // (r > g > b, mid+ luma so hair/beard/brows are untouched) and
+            // fades them toward a desaturated, white-lifted version. ---
+            float wLuma = dot(outColor, LUMA);
+            float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
+                          * smoothstep(0.0, 0.06, outColor.g - outColor.b)
+                          * smoothstep(0.15, 0.40, wLuma);
+            vec3 pale = mix(outColor, vec3(wLuma), 0.70);
+            pale += (vec3(1.0) - pale) * 0.24;
+            outColor = mix(outColor, pale, uGlow * 1.0 * skinHue);
+            // A small multiplicative gain on the same skin-toned pixels keeps
+            // the face reading bright and lit without shifting its (already
+            // matched) colour — gain preserves hue/sat where a white-mix pales.
+            outColor *= 1.0 + 0.08 * skinHue;
+
             // --- Life: global micro-contrast + vibrance so the image looks ALIVE,
             // not flat/"dead" — deepens blacks (hair/brows/beard read truly black),
-            // lifts highlights (facial dimensionality) and enriches colour. ---
-            outColor = (outColor - 0.5) * 1.03 + 0.5;
+            // lifts highlights (facial dimensionality) and enriches colour.
+            // uSharp scales both up for a punchier, more saturated grade. ---
+            outColor = (outColor - 0.5) * (1.03 + uSharp * 0.07) + 0.5;
             float gL = dot(outColor, LUMA);
-            outColor = mix(vec3(gL), outColor, 1.05);
+            outColor = mix(vec3(gL), outColor, 1.05 + uSharp * 0.20);
+
+            // --- Sharp (rich colour): deepen the shadows so dark hair, brows
+            // and beard read dense and truly dark instead of lifted/washed. ---
+            float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
+            outColor *= 1.0 - uSharp * 0.14 * shadow;
+
+            // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot
+            // re-add the warm cast the fair-skin grade removed. Trims the
+            // red-over-green excess on skin-toned pixels (porcelain, not
+            // orange) and returns a touch of blue to cool the tone. ---
+            float warmCast = outColor.r - outColor.g;
+            outColor.r -= warmCast * 0.18 * skinHue;
+            outColor.b += warmCast * 0.10 * skinHue;
+
+            // --- Bright: gentle global gamma lift so the frame reads light and
+            // airy (whiter walls/skin, the reference look). A gamma curve pins
+            // black and white, so hair keeps its depth and highlights never
+            // clip — it only lifts the mids. ---
+            outColor = pow(clamp(outColor, 0.0, 1.0), vec3(0.92));
+
+            // --- Rich blacks: shadow toe applied LAST (the gamma above grays
+            // the deepest tones ~25%; anything earlier gets re-lifted). Pulls
+            // sub-0.35-luma tones toward true black so hair, brows, beard and
+            // pupils read dense. Skin sits well above the toe, so the face
+            // brightness/whitening is untouched. Pure ALU in this same pass —
+            // no extra texture reads, no performance cost. ---
+            float toeL = dot(outColor, LUMA);
+            outColor *= 1.0 - 0.25 * (1.0 - smoothstep(0.0, 0.35, toeL));
 
             gl_FragColor = vec4(clamp(outColor, 0.0, 1.0), 1.0);
         }

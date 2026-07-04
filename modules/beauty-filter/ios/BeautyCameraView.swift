@@ -5,14 +5,23 @@
 //  ExpoView that owns the capture session, the Metal preview, and the face
 //  tracker, wiring them together. Counterpart to Android's BeautyCameraView.kt.
 //
-//  Data flow per frame (frame-locked, mirrors Android):
+//  Data flow per frame (frame-locked two-stage pipeline, mirrors Android):
 //    CameraController -> CVPixelBuffer
-//        -> FaceTracker.detect              (Vision, synchronous on that frame)
-//        -> MetalRenderer.submitFrame       (frame + its landmarks, together)
+//        -> FaceTracker.analyze             (parks buffer, keep-only-latest)
+//        -> [detect queue] Vision           (on that exact frame)
+//        -> FaceTracker.onFrame             (frame + its landmarks, together)
+//        -> MetalRenderer.submitFrame
 //        -> mtkView.setNeedsDisplay
 //
-//  Backpressure: alwaysDiscardsLateVideoFrames drops camera frames if
-//  detection makes us late — fps dips slightly, the warp never misaligns.
+//  While Vision handles frame N the capture queue is already delivering N+1,
+//  so throughput is the slower stage, not the sum (same shape as Android's
+//  MediaPipe LIVE_STREAM pairing). Backpressure: the pending slot replaces an
+//  unstarted frame, and alwaysDiscardsLateVideoFrames drops camera frames if
+//  everything is busy — fps dips slightly, the warp never misaligns.
+//
+//  Remaining intentional difference from Android: no CPU frame copies or
+//  bitmap pool (buffers arrive display-oriented and GPU-ready here), and no
+//  manual rotation (the capture connection does it).
 //
 
 import ExpoModulesCore
@@ -29,6 +38,12 @@ final class BeautyCameraView: ExpoView {
 
     private var facingFront = true
     private var started = false
+
+    // Preview frame-rate event (~1/s) for the JS fps indicator. Keep in sync
+    // with Android's BeautyCameraView.countFrameForFps.
+    private let onFps = EventDispatcher()
+    private var fpsWindowStart: CFTimeInterval = 0
+    private var fpsWindowFrames = 0
 
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
@@ -62,11 +77,30 @@ final class BeautyCameraView: ExpoView {
     }
 
     private func wire() {
+        // Stage 1: camera frames go to the tracker's keep-only-latest slot.
         camera.onPixelBuffer = { [weak self] buffer in
+            self?.faceTracker.analyze(buffer)
+        }
+        // Stage 2 output: frame + its own landmarks, delivered together.
+        faceTracker.onFrame = { [weak self] buffer, faces in
             guard let self = self else { return }
-            let faces = self.faceTracker.detect(pixelBuffer: buffer)
             self.renderer?.submitFrame(buffer, faces: faces)
             DispatchQueue.main.async { self.mtkView?.setNeedsDisplay() }
+            self.countFrameForFps()
+        }
+    }
+
+    /// Called once per delivered frame (detect queue); emits onFps ~1/s.
+    private func countFrameForFps() {
+        let now = CACurrentMediaTime()
+        if fpsWindowStart == 0 { fpsWindowStart = now }
+        fpsWindowFrames += 1
+        let elapsed = now - fpsWindowStart
+        if elapsed >= 1.0 {
+            let fps = Int((Double(fpsWindowFrames) / elapsed).rounded())
+            fpsWindowStart = now
+            fpsWindowFrames = 0
+            onFps(["fps": fps])
         }
     }
 
@@ -130,6 +164,10 @@ final class BeautyCameraView: ExpoView {
 
     func setWarmth(_ value: Float) {
         renderer?.warmth = max(0, min(1, value))
+    }
+
+    func setSharpness(_ value: Float) {
+        renderer?.sharpness = max(0, min(1, value))
     }
 
     func setEyeEnlarge(_ value: Float) {

@@ -27,6 +27,9 @@ class BeautyFilterModule : Module() {
         }
 
         View(BeautyCameraView::class) {
+            // ~1/s with {fps}: the preview frame rate, for the debug indicator.
+            Events("onFps")
+
             Prop("facing") { view, facing: String? ->
                 view.setFacing(facing ?: "front")
             }
@@ -45,6 +48,10 @@ class BeautyFilterModule : Module() {
 
             Prop("warmth") { view, value: Float? ->
                 view.setWarmth(value ?: 0f)
+            }
+
+            Prop("sharpness") { view, value: Float? ->
+                view.setSharpness(value ?: 0f)
             }
 
             Prop("eyeEnlarge") { view, value: Float? ->

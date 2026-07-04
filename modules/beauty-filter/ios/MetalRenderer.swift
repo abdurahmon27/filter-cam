@@ -41,6 +41,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     var glow: Float = 0
     var clarity: Float = 0
     var warmth: Float = 0
+    var sharpness: Float = 0
     var eyeEnlarge: Float = 0
     var noseSlim: Float = 0
     var faceSlim: Float = 0
@@ -67,6 +68,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var blurPipeline: MTLRenderPipelineState!
     private var compositePipeline: MTLRenderPipelineState!
     private var reshapePipeline: MTLRenderPipelineState!
+    private var passthroughPipeline: MTLRenderPipelineState!
     private var sharpenPipeline: MTLRenderPipelineState!
     private var solidPipeline: MTLRenderPipelineState!
     private var spritePipeline: MTLRenderPipelineState!
@@ -121,6 +123,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var glow: Float
         var clarity: Float
         var warmth: Float
+        var sharp: Float
     }
 
     private struct ReshapeScalars {
@@ -201,6 +204,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         blurPipeline = try makePipeline("fullscreen_vertex", "blur_fragment")
         compositePipeline = try makePipeline("fullscreen_vertex", "composite_fragment")
         reshapePipeline = try makePipeline("fullscreen_vertex", "reshape_fragment")
+        passthroughPipeline = try makePipeline("fullscreen_vertex", "passthrough_fragment")
         sharpenPipeline = try makePipeline("fullscreen_vertex", "sharpen_fragment")
         solidPipeline = try makePipeline("solid_vertex", "solid_fragment")
         spritePipeline = try makePipeline("sprite_vertex", "sprite_fragment", blend: .premultiplied)
@@ -256,7 +260,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
               let drawable = view.currentDrawable else { return }
 
         let adjust = BeautyUniforms(smooth: clamp01(smoothing), glow: clamp01(glow),
-                                    clarity: clamp01(clarity), warmth: clamp01(warmth))
+                                    clarity: clamp01(clarity), warmth: clamp01(warmth),
+                                    sharp: clamp01(sharpness))
 
         // 1. camera -> scene
         renderFullscreen(commandBuffer, target: sceneTex, pipeline: cameraPipeline, clear: false) { encoder in
@@ -343,14 +348,19 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                                   target: MTLTexture,
                                   pipeline: MTLRenderPipelineState,
                                   clear: Bool,
+                                  scissor: MTLScissorRect? = nil,
                                   configure: (MTLRenderCommandEncoder) -> Void) {
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = target
-        rpd.colorAttachments[0].loadAction = clear ? .clear : .dontCare
+        // A scissored draw must keep the pixels outside the rect.
+        rpd.colorAttachments[0].loadAction = clear ? .clear : (scissor != nil ? .load : .dontCare)
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         rpd.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
         encoder.setRenderPipelineState(pipeline)
+        if let scissor = scissor {
+            encoder.setScissorRect(scissor)
+        }
         configure(encoder)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
@@ -367,7 +377,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func bindSharpen(_ encoder: MTLRenderCommandEncoder, source: MTLTexture) {
         var texel = SIMD2<Float>(1 / Float(max(source.width, 1)), 1 / Float(max(source.height, 1)))
-        var amount: Float = 0.85 // matches Android BlitPass SHARPEN
+        // Matches Android BlitPass: SHARPEN_BASE + sharp * SHARPEN_RANGE.
+        var amount: Float = 0.85 + clamp01(sharpness) * 0.75
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentBytes(&texel, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
         encoder.setFragmentBytes(&amount, length: MemoryLayout<Float>.stride, index: 1)
@@ -440,6 +451,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var jawCount = 0
         let reshapesActive = eyeEnlarge > 0 || noseSlim > 0 || faceSlim > 0
 
+        // Warp-region bounding box in vis coords (y-down), grown region by
+        // region. Radii are aspect-corrected (dist uses (dx*aspect, dy)), so
+        // the x extent is r/aspect and the y extent is r. Mirrors Android's
+        // FaceReshapePass scissor.
+        var minU: Float = .greatestFiniteMagnitude
+        var minV: Float = .greatestFiniteMagnitude
+        var maxU: Float = -.greatestFiniteMagnitude
+        var maxV: Float = -.greatestFiniteMagnitude
+        func grow(_ c: SIMD2<Float>, _ r: Float) {
+            minU = min(minU, c.x - r / aspect)
+            maxU = max(maxU, c.x + r / aspect)
+            minV = min(minV, c.y - r)
+            maxV = max(maxV, c.y + r)
+        }
+
         if reshapesActive {
             for f in faces {
                 if faceCount >= Self.maxFaces { break }
@@ -450,13 +476,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 let scale = (dx * dx + dy * dy).squareRoot()
                 let mid = (le.x + re.x) / 2
 
-                reNoseC[faceCount] = SIMD2<Float>(visX(f.noseCenter), visY(f.noseCenter))
-                reNoseR[faceCount] = scale * 0.42
+                // Centre sits slightly ABOVE the nose centre (vis space is
+                // y-down) and the radius grows by the same amount: the
+                // slimming band reaches a little up the bridge while coverage
+                // below the tip (nostrils) is unchanged. Mirrors Android.
+                reNoseC[faceCount] = SIMD2<Float>(visX(f.noseCenter), visY(f.noseCenter) - scale * 0.08)
+                reNoseR[faceCount] = scale * 0.50
+                if noseSlim > 0 { grow(reNoseC[faceCount], reNoseR[faceCount]) }
                 faceCount += 1
 
                 if eyeEnlarge > 0 {
-                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = le; reEyeR[eyeCount] = leR; eyeCount += 1 }
-                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = re; reEyeR[eyeCount] = reR; eyeCount += 1 }
+                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = le; reEyeR[eyeCount] = leR; grow(le, leR); eyeCount += 1 }
+                    if eyeCount < Self.maxEyes { reEyes[eyeCount] = re; reEyeR[eyeCount] = reR; grow(re, reR); eyeCount += 1 }
                 }
 
                 // Face slim (see reshape_slimJaw): pinch anchors pinned to the
@@ -498,6 +529,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                                 let dir: Float = p.x < mid ? -1 : 1
                                 reJawD[jawCount] = SIMD2<Float>(dir * scale * Self.slimAmp * w / aspect, 0)
                                 reJawR[jawCount] = scale * Self.slimRadius
+                                grow(p, reJawR[jawCount])
                                 jawCount += 1
                             }
                         }
@@ -510,7 +542,28 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         // gated by jawCount).
         let faceN = noseSlim > 0 ? faceCount : 0
 
-        renderFullscreen(commandBuffer, target: finalTex, pipeline: reshapePipeline, clear: false) { encoder in
+        // 1) Cheap 1-tap blit of the whole frame. The warp shader evaluates
+        // every pinch/magnify region per fragment — far too expensive to run
+        // over the whole frame, so it is confined to the face box below.
+        renderFullscreen(commandBuffer, target: finalTex, pipeline: passthroughPipeline, clear: false) { encoder in
+            encoder.setFragmentTexture(outputTex, index: 0)
+        }
+
+        // 2) The warp, scissored to the face's bounding box (plus margin) —
+        // its cost scales with the face size, not the frame size.
+        if faceN == 0 && eyeCount == 0 && jawCount == 0 { return }
+        let pad: Float = 0.02
+        let w = Float(finalTex.width)
+        let h = Float(finalTex.height)
+        let x0 = Int(max(0, min(w, (minU - pad) * w)))
+        let y0 = Int(max(0, min(h, (minV - pad) * h)))
+        let x1 = Int(max(0, min(w, (maxU + pad) * w)))
+        let y1 = Int(max(0, min(h, (maxV + pad) * h)))
+        if x1 <= x0 || y1 <= y0 { return }
+        let scissor = MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+
+        renderFullscreen(commandBuffer, target: finalTex, pipeline: reshapePipeline,
+                         clear: false, scissor: scissor) { encoder in
             var sc = ReshapeScalars(aspect: aspect, faceCount: Int32(faceN),
                                     eyeCount: Int32(eyeCount), jawCount: Int32(jawCount),
                                     nose: clamp01(noseSlim), slim: clamp01(faceSlim),

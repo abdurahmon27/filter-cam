@@ -57,6 +57,7 @@ internal class StreamOutput(surface: Surface) {
         presentationTimeNs: Long,
         blit: BlitPass,
         quad: ScreenQuad,
+        sharp: Float = 0f,
     ) {
         val prevDraw = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
         val prevRead = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
@@ -64,7 +65,7 @@ internal class StreamOutput(surface: Surface) {
 
         EGL14.eglMakeCurrent(display, eglSurface, eglSurface, context)
         GLES20.glViewport(0, 0, width, height)
-        blit.draw(texture, width, height, quad)
+        blit.draw(texture, width, height, quad, sharp)
         EGLExt.eglPresentationTimeANDROID(display, eglSurface, presentationTimeNs)
         EGL14.eglSwapBuffers(display, eglSurface)
 

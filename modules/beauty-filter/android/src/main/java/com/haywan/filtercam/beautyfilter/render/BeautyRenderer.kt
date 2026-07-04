@@ -23,7 +23,8 @@ import javax.microedition.khronos.opengles.GL10
  * effect lagging the image, which is not.
  *
  * Pipeline per frame:
- *  1. [CameraPass]     — frame texture -> scene FBO (cover-crop, y-flip).
+ *  1. [CameraPass]     — raw frame texture -> scene FBO (rotate/mirror to
+ *                        display orientation + cover-crop, all GPU-side).
  *  2. [BlurPass]       — scene -> quarter-res two-pass gaussian blur.
  *  3. [FaceMaskPass]   — two feathered masks: skin (oval minus eyes/brows/lips)
  *                        for smoothing, and the full oval for tone/light.
@@ -41,15 +42,22 @@ internal class BeautyRenderer(
     @Volatile var glow = 0.3f
     @Volatile var clarity = 0.4f
     @Volatile var warmth = 0.15f
+    @Volatile var sharpness = 0.5f
     @Volatile var eyeEnlarge = 0f
     @Volatile var noseSlim = 0f
     @Volatile var faceSlim = 0f
     @Volatile var mustacheEnabled = false
     @Volatile var faceMeshEnabled = false
 
+    // How consumed/dropped frame bitmaps are given back. The view points this
+    // at the shared BitmapPool so full-res frames are reused, not GC'd.
+    @Volatile var releaseFrame: (Bitmap) -> Unit = { it.recycle() }
+
     // ---- frame + its paired landmarks (submitted together) ----
     private val frameLock = Any()
     private var pendingBitmap: Bitmap? = null
+    private var pendingRotation = 0
+    private var pendingMirror = false
     private var pendingFaces: Array<FloatArray> = emptyArray()
     private var faces: Array<FloatArray> = emptyArray() // GL thread only
     @Volatile private var pendingCapture: ((Bitmap) -> Unit)? = null
@@ -57,6 +65,8 @@ internal class BeautyRenderer(
     private var frameTexture = 0
     private var frameWidth = 0
     private var frameHeight = 0
+    private var frameRotation = 0   // GL thread only; degrees to upright
+    private var frameMirror = false // GL thread only; front-camera mirror
 
     private val viewport = Viewport()
     private val quad = ScreenQuad()
@@ -86,15 +96,18 @@ internal class BeautyRenderer(
     private var streamOutput: StreamOutput? = null
 
     /**
-     * Deliver a camera frame (already rotated/mirrored to display orientation)
-     * together with the landmarks detected on that exact frame. Called from the
-     * analyzer thread every frame; uploaded + rendered on the GL thread.
-     * Ownership of [bitmap] transfers here (recycled after upload).
+     * Deliver a RAW camera frame (un-rotated/un-mirrored; CameraPass orients it
+     * GPU-side) together with the landmarks detected on that exact frame — the
+     * landmarks ARE in upright display space. Called from the analyzer thread
+     * every frame; uploaded + rendered on the GL thread. Ownership of [bitmap]
+     * transfers here (recycled after upload).
      */
-    fun submitFrame(bitmap: Bitmap, faces: Array<FloatArray>) {
+    fun submitFrame(bitmap: Bitmap, rotationDegrees: Int, mirror: Boolean, faces: Array<FloatArray>) {
         synchronized(frameLock) {
-            pendingBitmap?.recycle() // drop an un-consumed previous frame
+            pendingBitmap?.let(releaseFrame) // drop an un-consumed previous frame
             pendingBitmap = bitmap
+            pendingRotation = rotationDegrees
+            pendingMirror = mirror
             pendingFaces = faces
         }
     }
@@ -140,7 +153,11 @@ internal class BeautyRenderer(
         val bmp = synchronized(frameLock) {
             val b = pendingBitmap
             pendingBitmap = null
-            if (b != null) faces = pendingFaces
+            if (b != null) {
+                faces = pendingFaces
+                frameRotation = pendingRotation
+                frameMirror = pendingMirror
+            }
             b
         }
         if (bmp != null) {
@@ -148,7 +165,7 @@ internal class BeautyRenderer(
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
             frameWidth = bmp.width
             frameHeight = bmp.height
-            bmp.recycle()
+            releaseFrame(bmp)
         }
         if (frameWidth <= 0) return
 
@@ -161,14 +178,14 @@ internal class BeautyRenderer(
         val mB = maskB ?: return
         val mC = maskC ?: return
 
-        viewport.updateCrop(0, frameWidth, frameHeight)
+        viewport.updateCrop(frameRotation, frameWidth, frameHeight)
         val lms = faces
         val adjust = BeautyAdjustments.of(
-            smoothing, glow, clarity, warmth, eyeEnlarge, noseSlim, faceSlim
+            smoothing, glow, clarity, warmth, sharpness, eyeEnlarge, noseSlim, faceSlim
         )
 
         // --- build the final filtered image into finalFbo ---
-        cameraPass.draw(frameTexture, viewport, scene, quad)
+        cameraPass.draw(frameTexture, frameRotation, frameMirror, viewport, scene, quad)
         blurPass.blurBoth(scene.texture, bA, bB, quad)
         maskPass.draw(lms, viewport, mA, mC, mB, blurPass, quad)
         compositePass.draw(scene, bB, mA, mC, beauty, adjust, viewport, quad)
@@ -179,12 +196,12 @@ internal class BeautyRenderer(
         // --- present: to the screen, and to the stream surface if attached ---
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, viewport.width, viewport.height)
-        blitPass.draw(finalImage.texture, viewport.width, viewport.height, quad)
+        blitPass.draw(finalImage.texture, viewport.width, viewport.height, quad, adjust.sharp)
 
         updateStreamOutput()
         streamOutput?.present(
             finalImage.texture, viewport.width, viewport.height,
-            SystemClock.elapsedRealtimeNanos(), blitPass, quad
+            SystemClock.elapsedRealtimeNanos(), blitPass, quad, adjust.sharp
         )
 
         pendingCapture?.let { callback ->

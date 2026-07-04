@@ -5,10 +5,13 @@ import android.graphics.Bitmap
 import android.opengl.GLSurfaceView
 import android.util.Log
 import androidx.lifecycle.LifecycleOwner
+import android.os.SystemClock
 import com.haywan.filtercam.beautyfilter.render.BeautyRenderer
+import com.haywan.filtercam.beautyfilter.tracking.BitmapPool
 import com.haywan.filtercam.beautyfilter.tracking.FaceTracker
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.Promise
+import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import java.io.File
 import java.io.FileOutputStream
@@ -28,6 +31,14 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
+    // Full-res frames cycle analyzer -> renderer -> back to this pool.
+    private val framePool = BitmapPool()
+
+    // Preview frame-rate event (~1/s) for the JS fps indicator.
+    private val onFps by EventDispatcher()
+    private var fpsWindowStartMs = 0L
+    private var fpsWindowFrames = 0
+
     @Volatile private var tracker: FaceTracker? = null
     private val cameraController = CameraController(
         context = context,
@@ -43,6 +54,7 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         glView.setRenderer(renderer)
         glView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         addView(glView)
+        renderer.releaseFrame = framePool::release
         // Model loading (~4 MB) happens off the main thread.
         analysisExecutor.execute {
             tracker = try {
@@ -51,15 +63,31 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
                 // slides off the face during motion.
                 FaceTracker(
                     context,
-                    onFrame = { bitmap, faces ->
-                        renderer.submitFrame(bitmap, faces)
+                    pool = framePool,
+                    onFrame = { bitmap, rotation, mirror, faces ->
+                        renderer.submitFrame(bitmap, rotation, mirror, faces)
                         glView.requestRender()
+                        countFrameForFps()
                     },
                 ).also { it.isFrontCamera = facingFront }
             } catch (t: Throwable) {
                 Log.e(TAG, "FaceTracker init failed; filters will be inactive", t)
                 null
             }
+        }
+    }
+
+    /** Called once per delivered frame (detect thread); emits onFps ~1/s. */
+    private fun countFrameForFps() {
+        val now = SystemClock.uptimeMillis()
+        if (fpsWindowStartMs == 0L) fpsWindowStartMs = now
+        fpsWindowFrames++
+        val elapsed = now - fpsWindowStartMs
+        if (elapsed >= 1000) {
+            val fps = fpsWindowFrames * 1000f / elapsed
+            fpsWindowStartMs = now
+            fpsWindowFrames = 0
+            onFps(mapOf("fps" to Math.round(fps)))
         }
     }
 
@@ -100,6 +128,10 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
 
     fun setWarmth(value: Float) {
         renderer.warmth = value.coerceIn(0f, 1f)
+    }
+
+    fun setSharpness(value: Float) {
+        renderer.sharpness = value.coerceIn(0f, 1f)
     }
 
     fun setEyeEnlarge(value: Float) {

@@ -75,7 +75,10 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     private func configureSession() {
         session.beginConfiguration()
-        session.sessionPreset = .photo // 4:3, matches Android's RATIO_4_3
+        // .inputPriority so the device's activeFormat (set below) wins; the
+        // old .photo preset delivered full-sensor 4:3 (~12MP) frames, far
+        // heavier than needed and mismatched with Android's 1440x1080.
+        session.sessionPreset = .inputPriority
 
         if let existing = currentInput {
             session.removeInput(existing)
@@ -94,12 +97,47 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             currentInput = input
         }
 
+        configureFormat(device)
+
         if session.outputs.isEmpty, session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
         }
 
         applyOrientation()
         session.commitConfiguration()
+    }
+
+    /// Pick the smallest 4:3 format at least 1440 wide at 30fps — parity with
+    /// Android's 1440x1080 (the 4:3 sibling of 720p): sharp on a phone screen,
+    /// half the copy/detect cost of full-sensor frames. Falls back to the
+    /// session default when no such format exists.
+    private func configureFormat(_ device: AVCaptureDevice) {
+        var best: AVCaptureDevice.Format?
+        var bestWidth = Int32.max
+        for format in device.formats {
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard dims.width * 3 == dims.height * 4,      // 4:3 only
+                  dims.width >= 1440,
+                  format.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= 30 })
+            else { continue }
+            if dims.width < bestWidth {
+                bestWidth = dims.width
+                best = format
+            }
+        }
+        guard let format = best else {
+            NSLog("[BeautyFilter] no 4:3 >=1440-wide format; using session default")
+            return
+        }
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = format
+            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+            device.unlockForConfiguration()
+        } catch {
+            NSLog("[BeautyFilter] lockForConfiguration failed: \(error.localizedDescription)")
+        }
     }
 
     /// Force portrait + front mirroring on the video-data connection so the

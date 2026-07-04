@@ -21,6 +21,12 @@ export type BeautyCameraViewProps = ViewProps & {
   clarity?: number;
   /** Warm tone, 0..1. */
   warmth?: number;
+  /**
+   * Sharpness / rich colour, 0..1. Boosts edge acutance (hair, eyes,
+   * background), deepens shadows and adds vibrance for a crisper,
+   * higher-quality look. Smoothed skin stays clean.
+   */
+  sharpness?: number;
   /** Eye-enlarge amount, 0..1. */
   eyeEnlarge?: number;
   /** Nose-slim amount, 0..1. */
@@ -31,6 +37,8 @@ export type BeautyCameraViewProps = ViewProps & {
   mustache?: boolean;
   /** Overlay every tracked landmark as a dot (debug / face-mesh view). */
   faceMesh?: boolean;
+  /** Called ~once per second with the current preview frame rate. */
+  onFps?: (event: { nativeEvent: { fps: number } }) => void;
 };
 
 export type BeautyCameraViewRef = {

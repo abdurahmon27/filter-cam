@@ -15,7 +15,7 @@ import com.haywan.filtercam.beautyfilter.gl.Shaders
 internal class BlitPass {
     private val program = GlUtils.buildProgram(Shaders.FULLSCREEN_VS, Shaders.SHARPEN_FS)
 
-    fun draw(texture: Int, srcWidth: Int, srcHeight: Int, quad: ScreenQuad) {
+    fun draw(texture: Int, srcWidth: Int, srcHeight: Int, quad: ScreenQuad, sharp: Float = 0f) {
         GLES20.glUseProgram(program)
         quad.bind(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -25,13 +25,18 @@ internal class BlitPass {
             GLES20.glGetUniformLocation(program, "uTexel"),
             1f / srcWidth.coerceAtLeast(1), 1f / srcHeight.coerceAtLeast(1)
         )
-        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uAmount"), SHARPEN)
+        GLES20.glUniform1f(
+            GLES20.glGetUniformLocation(program, "uAmount"),
+            SHARPEN_BASE + sharp.coerceIn(0f, 1f) * SHARPEN_RANGE
+        )
         quad.draw()
     }
 
     companion object {
-        // Unsharp-mask strength. Enough to restore acutance on the upscaled frame
-        // without ringing or amplifying skin noise.
-        private const val SHARPEN = 0.85f
+        // Unsharp-mask strength: base restores acutance on the upscaled frame
+        // without ringing; the Sharp slider adds up to SHARPEN_RANGE on top for
+        // crisper hair/edge definition.
+        private const val SHARPEN_BASE = 0.85f
+        private const val SHARPEN_RANGE = 0.75f
     }
 }

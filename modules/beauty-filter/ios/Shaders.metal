@@ -81,6 +81,7 @@ struct BeautyUniforms {
     float glow;
     float clarity;
     float warmth;
+    float sharp;   // structure + rich colour (deep shadows, vibrance)
 };
 
 fragment float4 composite_fragment(FSOut in [[stage_in]],
@@ -121,6 +122,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     c = clamp(c, 0.0, 1.0);
     float3 outColor = mix(scene, c, face);
 
+    // --- Sharp (structure): large-radius local contrast against the blurred
+    // scene, gated OFF smoothed skin — hair strands, eyes, brows and the
+    // background gain crisp definition while the retouched skin stays clean.
+    // Runs before bloom/warmth so those global grades are not re-amplified. ---
+    outColor += (outColor - low) * (u.sharp * 0.35 * (1.0 - skin * 0.8));
+    outColor = clamp(outColor, 0.0, 1.0);
+
     // --- Glow (bloom): screen-blend the blurred scene's own soft highlights
     // over the WHOLE frame (port of Android). Light spreads where light
     // already exists, so there is no geometric boundary to see. ---
@@ -132,10 +140,55 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float darkGuard = smoothstep(0.08, 0.35, dot(outColor, LUMA));
     outColor += float3(0.045, 0.016, -0.026) * (u.warmth * darkGuard);
 
-    // --- Life: global micro-contrast + vibrance so the image looks alive. ---
-    outColor = (outColor - 0.5) * 1.03 + 0.5;
+    // --- Fair skin (glow-driven): pale, porcelain whitening of skin-TONED
+    // pixels across the whole frame — face, ears and neck alike, so there is
+    // no mask seam. Detects warm skin hues (r > g > b, mid+ luma so hair/
+    // beard/brows are untouched) and fades them toward a desaturated,
+    // white-lifted version. ---
+    float wLuma = dot(outColor, LUMA);
+    float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
+                  * smoothstep(0.0, 0.06, outColor.g - outColor.b)
+                  * smoothstep(0.15, 0.40, wLuma);
+    float3 pale = mix(outColor, float3(wLuma), 0.70);
+    pale += (float3(1.0) - pale) * 0.24;
+    outColor = mix(outColor, pale, u.glow * 1.0 * skinHue);
+    // A small multiplicative gain on the same skin-toned pixels keeps the face
+    // reading bright and lit without shifting its (already matched) colour —
+    // gain preserves hue/sat where a white-mix pales.
+    outColor *= 1.0 + 0.08 * skinHue;
+
+    // --- Life: global micro-contrast + vibrance so the image looks alive.
+    // sharp scales both up for a punchier, more saturated grade. ---
+    outColor = (outColor - 0.5) * (1.03 + u.sharp * 0.07) + 0.5;
     float gL = dot(outColor, LUMA);
-    outColor = mix(float3(gL), outColor, 1.05);
+    outColor = mix(float3(gL), outColor, 1.05 + u.sharp * 0.20);
+
+    // --- Sharp (rich colour): deepen the shadows so dark hair, brows and
+    // beard read dense and truly dark instead of lifted/washed. ---
+    float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
+    outColor *= 1.0 - u.sharp * 0.14 * shadow;
+
+    // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot re-add
+    // the warm cast the fair-skin grade removed. Trims the red-over-green
+    // excess on skin-toned pixels (porcelain, not orange) and returns a touch
+    // of blue to cool the tone. ---
+    float warmCast = outColor.r - outColor.g;
+    outColor.r -= warmCast * 0.18 * skinHue;
+    outColor.b += warmCast * 0.10 * skinHue;
+
+    // --- Bright: gentle global gamma lift so the frame reads light and airy
+    // (whiter walls/skin, the reference look). A gamma curve pins black and
+    // white, so hair keeps its depth and highlights never clip. ---
+    outColor = pow(clamp(outColor, 0.0, 1.0), float3(0.92));
+
+    // --- Rich blacks: shadow toe applied LAST (the gamma above grays the
+    // deepest tones ~25%; anything earlier gets re-lifted). Pulls sub-0.35-
+    // luma tones toward true black so hair, brows, beard and pupils read
+    // dense. Skin sits well above the toe, so the face brightness/whitening
+    // is untouched. Pure ALU in this same pass — no extra texture reads, no
+    // performance cost. ---
+    float toeL = dot(outColor, LUMA);
+    outColor *= 1.0 - 0.25 * (1.0 - smoothstep(0.0, 0.35, toeL));
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }

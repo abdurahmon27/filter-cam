@@ -2,19 +2,24 @@
 //  FaceTracker.swift
 //  BeautyFilter
 //
-//  Runs Vision's VNDetectFaceLandmarksRequest synchronously on each camera
-//  frame and returns temporally-smoothed, display-oriented landmarks.
+//  Runs Vision's VNDetectFaceLandmarksRequest and delivers each frame
+//  TOGETHER with temporally-smoothed, display-oriented landmarks detected on
+//  that exact frame.
 //
-//  Mirrors the Android FaceTracker's **frame-locked** design (the approach the
-//  major AR-filter apps use): the caller runs detection on the frame it is
-//  about to display and hands frame + landmarks to the renderer together, so
-//  the warp can never slide off the face during motion. Image and effect are
-//  delayed together by the detect time (invisible); the effect lagging the
-//  image (the old decoupled design) is what reads as a "dancing" filter.
+//  Mirrors the Android FaceTracker's **frame-locked two-stage pipeline** (the
+//  approach the major AR-filter apps use): the warp can never slide off the
+//  face during motion — image and effect are delayed together by the detect
+//  time (invisible); the effect lagging the image (a decoupled design, tried
+//  on Android) is what reads as a "dancing" filter.
 //
-//  Backpressure comes from AVCaptureVideoDataOutput's
-//  alwaysDiscardsLateVideoFrames: if detection makes a frame late, the session
-//  drops camera frames and the preview fps dips slightly — never misaligns.
+//  Stage 1 (camera sample queue): `analyze` parks the newest buffer in the
+//  keep-only-latest slot — never blocks on detection.
+//  Stage 2 (detect queue): Vision runs on the waiting buffer and the frame +
+//  its own landmarks go out via `onFrame` together. While Vision handles
+//  frame N the camera queue is already delivering N+1, so throughput is the
+//  slower stage, not the sum. If detection lags the camera rate the pending
+//  buffer is replaced (fps dips, never misaligns) — the same policy as
+//  Android and as alwaysDiscardsLateVideoFrames.
 //
 //  Smoothing is a One Euro filter (no extrapolation — landmarks are already
 //  matched to the displayed pixels, prediction would create misalignment), plus
@@ -32,12 +37,31 @@ import QuartzCore
 
 final class FaceTracker {
 
+    /// Frame + the landmarks detected on that exact frame (frame-locked).
+    /// Called on the detect queue, once per processed frame.
+    var onFrame: ((CVPixelBuffer, [FaceLandmarks]) -> Void)?
+
     private let request: VNDetectFaceLandmarksRequest
 
-    // Smoothing / hold state (touched only on the camera sample queue).
+    // Stage 2 runs here so stage 1 (the camera sample queue) never waits on
+    // Vision. Serial: all smoothing state below is confined to this queue.
+    private let detectQueue = DispatchQueue(label: "beautyfilter.facetracker.detect")
+
+    // Newest buffer waiting for the detect queue (keep-only-latest, like
+    // CameraX's backpressure on Android). Holding it here + one in Vision +
+    // one in the renderer keeps at most 3 buffers from the capture pool
+    // outstanding; alwaysDiscardsLateVideoFrames degrades gracefully if the
+    // pool ever runs dry.
+    private let pendingLock = NSLock()
+    private var pending: CVPixelBuffer?
+
+    // Smoothing / hold state (touched only on the detect queue).
     private let filter = OneEuroFilterBank()
     private var held: [FaceLandmarks]?
     private var lastFaceSeen: CFTimeInterval = 0
+    private var detectEmaMs: Double = 0
+    private var frameCount: UInt64 = 0
+    private var lastLogTime: CFTimeInterval = 0
 
     // Largest face only, matching Android's numFaces=1 (single-host streaming;
     // raise on both platforms together if multi-face becomes a requirement).
@@ -49,8 +73,12 @@ final class FaceTracker {
     fileprivate static let beta: CGFloat = 15
     fileprivate static let dCutoff: CGFloat = 1.0
 
-    // Hold the last landmarks this long when the face briefly drops out.
-    private static let occlusionGraceSec: CFTimeInterval = 0.3
+    // Hold the last landmarks this long when the face briefly drops out —
+    // generous on purpose (matches Android): fast head motion / a phone shake
+    // is exactly when the detector blips, and the filter visibly popping off
+    // and back on is the tell that "it's a filter". Holding still through the
+    // blip is invisible; only a sustained disappearance clears the filter.
+    private static let occlusionGraceSec: CFTimeInterval = 0.5
 
     init() {
         request = VNDetectFaceLandmarksRequest()
@@ -60,13 +88,45 @@ final class FaceTracker {
         request.usesCPUOnly = false
     }
 
-    /// Synchronously detect + smooth landmarks for a frame. Called on the
-    /// camera sample queue; returns an empty array when no face is present
-    /// (after the grace period).
+    /// Stage 1, on the camera sample queue: park the newest buffer and poke
+    /// the detect queue. Never blocks on Vision.
     ///
     /// - Parameter pixelBuffer: an upright, front-mirrored BGRA buffer. Because
     ///   the buffer is already oriented for display, Vision runs with `.up`.
-    func detect(pixelBuffer: CVPixelBuffer) -> [FaceLandmarks] {
+    func analyze(_ pixelBuffer: CVPixelBuffer) {
+        pendingLock.lock()
+        pending = pixelBuffer // replaces an unstarted older frame (ARC releases it)
+        pendingLock.unlock()
+        detectQueue.async { [weak self] in self?.drainOne() }
+    }
+
+    /// Stage 2, on the detect queue: detect on the waiting buffer and deliver
+    /// frame + landmarks together.
+    private func drainOne() {
+        pendingLock.lock()
+        let buffer = pending
+        pending = nil
+        pendingLock.unlock()
+        guard let buffer = buffer else { return } // drained by a previous task
+
+        let start = CACurrentMediaTime()
+        let faces = detect(pixelBuffer: buffer)
+
+        detectEmaMs += ((CACurrentMediaTime() - start) * 1000 - detectEmaMs) * 0.1
+        frameCount += 1
+        if frameCount % 300 == 0 {
+            let now = CACurrentMediaTime()
+            let fps = lastLogTime > 0 ? 300.0 / (now - lastLogTime) : 0
+            lastLogTime = now
+            NSLog("[BeautyFilter] pipeline detect %.1fms -> %.1f fps", detectEmaMs, fps)
+        }
+
+        onFrame?(buffer, faces)
+    }
+
+    /// Detect + smooth landmarks for a frame, on the detect queue; returns an
+    /// empty array when no face is present (after the grace period).
+    private func detect(pixelBuffer: CVPixelBuffer) -> [FaceLandmarks] {
         let now = CACurrentMediaTime()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                             orientation: .up,

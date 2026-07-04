@@ -46,6 +46,7 @@ internal class CompositePass {
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uGlow"), adjust.glow)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uClarity"), adjust.clarity)
         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uWarmth"), adjust.warmth)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uSharp"), adjust.sharp)
         quad.draw()
     }
 }

@@ -33,6 +33,7 @@ export type FilterId =
   | 'glow'
   | 'clarity'
   | 'warm'
+  | 'sharp'
   | 'eyes'
   | 'nose'
   | 'slim';
@@ -47,6 +48,7 @@ export const BEAUTY_FILTERS: {
     | 'glow'
     | 'clarity'
     | 'warmth'
+    | 'sharpness'
     | 'eyeEnlarge'
     | 'noseSlim'
     | 'faceSlim';
@@ -55,6 +57,7 @@ export const BEAUTY_FILTERS: {
   { id: 'glow', label: 'Glow', icon: '✨', prop: 'glow' },
   { id: 'clarity', label: 'Clear', icon: '🫧', prop: 'clarity' },
   { id: 'warm', label: 'Warm', icon: '🔆', prop: 'warmth' },
+  { id: 'sharp', label: 'Sharp', icon: '💎', prop: 'sharpness' },
   { id: 'eyes', label: 'Big Eyes', icon: '👁️', prop: 'eyeEnlarge' },
   { id: 'nose', label: 'Nose', icon: '👃', prop: 'noseSlim' },
   { id: 'slim', label: 'Slim', icon: '🫰', prop: 'faceSlim' },
@@ -64,11 +67,12 @@ export const BEAUTY_FILTERS: {
 // a gentle skin-tone glow and a touch of warmth. Eye-enlarge stays off by
 // default (it's a strong geometric effect users can dial in themselves).
 export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
-  smooth: 0.7,
+  smooth: 0.75,
   glow: 0.4,
   clarity: 0.55,
   warm: 0.08,
+  sharp: 0.3,
   eyes: 0.15,
-  nose: 0.1,
+  nose: 0.2,
   slim: 0.42,
 };

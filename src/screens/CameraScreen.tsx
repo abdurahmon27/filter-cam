@@ -59,6 +59,7 @@ const NO_INTENSITIES: Record<FilterId, number> = {
   glow: 0,
   clarity: 0,
   warm: 0,
+  sharp: 0,
   eyes: 0,
   nose: 0,
   slim: 0,
@@ -74,6 +75,7 @@ export default function CameraScreen({ onClose }: Props) {
   const [faceMesh, setFaceMesh] = useState(false);
   const [carouselOpen, setCarouselOpen] = useState(true);
   const [framing, setFraming] = useState<Framing>('3:5');
+  const [fps, setFps] = useState<number | null>(null);
   const nativeCameraRef = useRef<BeautyCameraViewRef>(null);
 
   const useNativeCamera = isBeautyCameraAvailable && BeautyCameraView != null;
@@ -141,11 +143,13 @@ export default function CameraScreen({ onClose }: Props) {
               glow={intensities.glow}
               clarity={intensities.clarity}
               warmth={intensities.warm}
+              sharpness={intensities.sharp}
               eyeEnlarge={intensities.eyes}
               noseSlim={intensities.nose}
               faceSlim={intensities.slim}
               mustache={mustache}
               faceMesh={faceMesh}
+              onFps={(e) => setFps(e.nativeEvent.fps)}
             />
           ) : (
             <>
@@ -155,6 +159,13 @@ export default function CameraScreen({ onClose }: Props) {
             </>
           )}
         </View>
+
+        {/* FPS indicator (native camera only) */}
+        {useNativeCamera && fps != null && (
+          <View style={[styles.fpsPill, { top: insets.top + 64 }]}>
+            <Text style={styles.fpsText}>{fps} FPS</Text>
+          </View>
+        )}
 
         {/* Top glass controls */}
         <View
@@ -280,6 +291,21 @@ const styles = StyleSheet.create({
     fontSize: theme.font.label,
     fontWeight: '800',
     letterSpacing: 0.5,
+  },
+  fpsPill: {
+    position: 'absolute',
+    left: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: theme.radius.pill,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  fpsText: {
+    color: '#7CFC9B',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    fontVariant: ['tabular-nums'],
   },
   roundBtn: {
     width: 44,

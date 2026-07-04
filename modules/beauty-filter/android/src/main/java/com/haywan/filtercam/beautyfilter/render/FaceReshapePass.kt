@@ -27,6 +27,13 @@ import kotlin.math.sign
 internal class FaceReshapePass {
     private val program = GlUtils.buildProgram(Shaders.FULLSCREEN_VS, Shaders.FACE_RESHAPE_FS)
 
+    // Plain 1-tap copy. The warp shader evaluates every pinch/magnify region
+    // per fragment, which is far too expensive to run over the whole frame:
+    // the image is blitted with this instead, and the warp draw is scissored
+    // to the face's bounding box (a fraction of the screen), so the GPU cost
+    // of reshape scales with the face size, not the frame size.
+    private val blitProgram = GlUtils.buildProgram(Shaders.FULLSCREEN_VS, Shaders.SPRITE_FS)
+
     private val noseC = FloatArray(MAX_FACES * 2)
     private val noseR = FloatArray(MAX_FACES)
     private val eyeXY = FloatArray(MAX_EYES * 2)
@@ -34,6 +41,25 @@ internal class FaceReshapePass {
     private val jawP = FloatArray(MAX_JAW * 2)
     private val jawD = FloatArray(MAX_JAW * 2)
     private val jawR = FloatArray(MAX_JAW)
+
+    // Warp-region bounding box in UV (y-up), grown region by region.
+    private var minU = 0f
+    private var minV = 0f
+    private var maxU = 0f
+    private var maxV = 0f
+
+    private fun resetBox() {
+        minU = Float.MAX_VALUE; minV = Float.MAX_VALUE
+        maxU = -Float.MAX_VALUE; maxV = -Float.MAX_VALUE
+    }
+
+    /** Grow the box by a region at (cx,cy) with aspect-corrected radius r. */
+    private fun grow(cx: Float, cy: Float, r: Float, aspect: Float) {
+        if (cx - r / aspect < minU) minU = cx - r / aspect
+        if (cx + r / aspect > maxU) maxU = cx + r / aspect
+        if (cy - r < minV) minV = cy - r
+        if (cy + r > maxV) maxV = cy + r
+    }
 
     fun draw(
         source: Framebuffer,
@@ -47,6 +73,7 @@ internal class FaceReshapePass {
         var faceCount = 0
         var eyeCount = 0
         var jawCount = 0
+        resetBox()
 
         if (adjust.reshapes) {
             for (face in faces) {
@@ -57,13 +84,20 @@ internal class FaceReshapePass {
                 val midX = (le[0] + re[0]) / 2f
 
                 noseC[faceCount * 2] = ux(face, FaceTopology.NOSE_TIP, viewport)
-                noseC[faceCount * 2 + 1] = uy(face, FaceTopology.NOSE_TIP, viewport)
-                noseR[faceCount] = scale * 0.42f
+                // Centre sits slightly ABOVE the tip (uv is y-up) and the
+                // radius grows by the same amount: the slimming band reaches a
+                // little up the bridge while coverage below the tip
+                // (nostrils) is unchanged.
+                noseC[faceCount * 2 + 1] = uy(face, FaceTopology.NOSE_TIP, viewport) + scale * 0.08f
+                noseR[faceCount] = scale * 0.50f
+                if (adjust.noseSlim > 0f) {
+                    grow(noseC[faceCount * 2], noseC[faceCount * 2 + 1], noseR[faceCount], aspect)
+                }
                 faceCount++
 
                 if (adjust.eyeEnlarge > 0f) {
-                    if (eyeCount < MAX_EYES) { putEye(eyeCount, le); eyeCount++ }
-                    if (eyeCount < MAX_EYES) { putEye(eyeCount, re); eyeCount++ }
+                    if (eyeCount < MAX_EYES) { putEye(eyeCount, le); grow(le[0], le[1], le[2], aspect); eyeCount++ }
+                    if (eyeCount < MAX_EYES) { putEye(eyeCount, re); grow(re[0], re[1], re[2], aspect); eyeCount++ }
                 }
 
                 if (adjust.faceSlim > 0f && scale > 1e-4f) {
@@ -90,6 +124,7 @@ internal class FaceReshapePass {
                             jawD[jawCount * 2] = sign(px - midX) * scale * SLIM_AMP * w / aspect
                             jawD[jawCount * 2 + 1] = 0f
                             jawR[jawCount] = scale * SLIM_RADIUS
+                            grow(px, py, jawR[jawCount], aspect)
                             jawCount++
                         }
                     }
@@ -100,8 +135,27 @@ internal class FaceReshapePass {
         // Only feed the nose arrays when that warp is active.
         val faceN = if (adjust.noseSlim > 0f) faceCount else 0
 
+        // 1) Cheap 1-tap blit of the whole frame.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, target.framebuffer)
         GLES20.glViewport(0, 0, target.width, target.height)
+        GLES20.glUseProgram(blitProgram)
+        quad.bind(blitProgram)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, source.texture)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(blitProgram, "uTex"), 0)
+        quad.draw()
+
+        // 2) The warp, scissored to the face's bounding box (plus margin).
+        if (faceN == 0 && eyeCount == 0 && jawCount == 0) return
+        val pad = 0.02f
+        val x0 = ((minU - pad) * target.width).toInt().coerceIn(0, target.width)
+        val y0 = ((minV - pad) * target.height).toInt().coerceIn(0, target.height)
+        val x1 = ((maxU + pad) * target.width).toInt().coerceIn(0, target.width)
+        val y1 = ((maxV + pad) * target.height).toInt().coerceIn(0, target.height)
+        if (x1 <= x0 || y1 <= y0) return
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glScissor(x0, y0, x1 - x0, y1 - y0)
+
         GLES20.glUseProgram(program)
         quad.bind(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -132,6 +186,7 @@ internal class FaceReshapePass {
         }
 
         quad.draw()
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
     }
 
     private fun loc(name: String) = GLES20.glGetUniformLocation(program, name)

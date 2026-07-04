@@ -44,15 +44,19 @@ internal class CameraController(
                 }
 
                 // ImageAnalysis defaults to a soft 640x480; this is what the user
-                // both sees AND we detect on (single-stream). Request 1280x960 for
-                // a crisp preview (hair/brows/beard read sharp). The per-frame
-                // rotation now uses filter=false (see FaceTracker) so this higher
-                // resolution stays affordable.
+                // both sees AND we detect on (single-stream). 1440x1080 is the
+                // 4:3 sibling of 720p (what the reference apps stream at): its
+                // upright width matches a 1080p screen 1:1, so the preview reads
+                // sharp (the blit sharpen covers the mild height upscale), while
+                // per-frame copy/prep/upload cost half of 1920x1440's. Detection
+                // cost is unaffected (detect input is downscaled to
+                // DETECT_LONG_SIDE) and rotation/mirror happen GPU-side in
+                // CameraPass.
                 val ratio43 = ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(1280, 960),
+                            Size(1440, 1080),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )
