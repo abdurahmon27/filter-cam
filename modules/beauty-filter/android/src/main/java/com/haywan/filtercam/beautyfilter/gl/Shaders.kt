@@ -132,7 +132,10 @@ internal object Shaders {
             // a small fraction on flat skin so acne, pores and blemishes are
             // cleaned away (like the reference) while beard/lash/brow stay sharp.
             float edge = smoothstep(0.055, 0.22, amp);
-            float keep = mix(0.28, 1.0, edge);
+            // Keep floor 0.35: enough texture survives on flat skin (pores,
+            // stubble shadow) that the face still reads REAL at high sliders —
+            // lower floors flatten it into a plastic, cartoon-like mask.
+            float keep = mix(0.35, 1.0, edge);
             vec3 smoothed = low + high * keep;
             // Opacity blend over the ORIGINAL, skin mask only.
             vec3 c = mix(scene, smoothed, uSmooth * skin);
@@ -178,24 +181,26 @@ internal object Shaders {
             float darkGuard = smoothstep(0.08, 0.35, dot(outColor, LUMA));
             outColor += vec3(0.045, 0.016, -0.026) * (uWarmth * darkGuard);
 
-            // --- Fair skin (glow-driven): pale, porcelain whitening of
+            // --- Fair skin (glow-driven): a GENTLE brightening/evening of
             // skin-TONED pixels across the whole frame — face, ears and neck
             // alike, so there is no mask seam. Detects warm skin hues
-            // (r > g > b, mid+ luma so hair/beard/brows are untouched) and
-            // fades them toward a desaturated, white-lifted version. ---
+            // (r > g > b, mid+ luma so hair/beard/brows are untouched).
+            // Deliberately subtle: the target keeps most of the skin's own
+            // hue/saturation — a heavier pale target (e.g. 0.70 desat) turns
+            // the face into a flat, doll-like, cartoon mask. ---
             float wLuma = dot(outColor, LUMA);
             float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
                           * smoothstep(0.0, 0.06, outColor.g - outColor.b)
                           * smoothstep(0.15, 0.40, wLuma);
-            vec3 pale = mix(outColor, vec3(wLuma), 0.70);
-            pale += (vec3(1.0) - pale) * 0.24;
-            outColor = mix(outColor, pale, uGlow * 1.0 * skinHue);
+            vec3 pale = mix(outColor, vec3(wLuma), 0.35);
+            pale += (vec3(1.0) - pale) * 0.10;
+            outColor = mix(outColor, pale, uGlow * 0.5 * skinHue);
             // A small multiplicative gain on the same skin-toned pixels keeps
             // the face reading bright and lit without shifting its (already
             // matched) colour — gain preserves hue/sat where a white-mix pales.
             // Glow-gated like the rest of the fair-skin block: every grade in
             // this shader must vanish at slider 0 so "Reset" means a raw frame.
-            outColor *= 1.0 + 0.08 * skinHue * uGlow;
+            outColor *= 1.0 + 0.04 * skinHue * uGlow;
 
             // --- Life: global micro-contrast + vibrance so the image looks ALIVE,
             // not flat/"dead" — deepens blacks (hair/brows/beard read truly black),
@@ -216,15 +221,17 @@ internal object Shaders {
             // red-over-green excess on skin-toned pixels (porcelain, not
             // orange) and returns a touch of blue to cool the tone. Glow-gated
             // (it is the companion of the glow-driven fair-skin grade). ---
+            // Kept LIGHT: skin needs its warm red component to look alive —
+            // trimming it hard is a big contributor to the cartoon look.
             float warmCast = outColor.r - outColor.g;
-            outColor.r -= warmCast * 0.18 * skinHue * uGlow;
-            outColor.b += warmCast * 0.10 * skinHue * uGlow;
+            outColor.r -= warmCast * 0.08 * skinHue * uGlow;
+            outColor.b += warmCast * 0.04 * skinHue * uGlow;
 
             // --- Bright: gentle global gamma lift so the frame reads light and
             // airy (whiter walls/skin, the reference look). A gamma curve pins
             // black and white, so hair keeps its depth and highlights never
-            // clip — it only lifts the mids. Glow-driven (0.92 at full). ---
-            outColor = pow(clamp(outColor, 0.0, 1.0), vec3(1.0 - 0.08 * uGlow));
+            // clip — it only lifts the mids. Glow-driven (0.95 at full). ---
+            outColor = pow(clamp(outColor, 0.0, 1.0), vec3(1.0 - 0.05 * uGlow));
 
             // --- Rich blacks: shadow toe applied LAST (the gamma above grays
             // the deepest tones; anything earlier gets re-lifted). Pulls
@@ -233,7 +240,7 @@ internal object Shaders {
             // brightness/whitening is untouched. uSharp-driven (up to 25% at
             // full). Pure ALU in this same pass — no extra reads, no cost. ---
             float toeL = dot(outColor, LUMA);
-            outColor *= 1.0 - 0.25 * uSharp * (1.0 - smoothstep(0.0, 0.35, toeL));
+            outColor *= 1.0 - 0.30 * uSharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
             gl_FragColor = vec4(clamp(outColor, 0.0, 1.0), 1.0);
         }

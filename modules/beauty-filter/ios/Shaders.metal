@@ -99,14 +99,20 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float face   = faceTex.sample(s, in.uv).r;
 
     // --- Edge-aware skin smoothing (frequency separation) ---
-    // iOS-ONLY TUNING (Android keeps floor 0.28): a lower flat-skin keep so
-    // blotches/redness texture clean up harder at the same slider — the
-    // reference apps' complexion is more uniform than the iPhone's sharper,
-    // flatter feed leaves it at Android's floor. Edges keep full detail.
+    // Keep floor 0.35 (matches Android): enough texture survives on flat skin
+    // (pores, stubble shadow) that the face still reads REAL at high sliders —
+    // the earlier 0.22 floor cleaned complexion harder but flattened the face
+    // into a plastic, cartoon-like mask. Edges keep full detail.
     float3 high = scene - low;
     float amp = length(high);
     float edge = smoothstep(0.055, 0.22, amp);
-    float keep = mix(0.22, 1.0, edge);
+    float keep = mix(0.35, 1.0, edge);
+    // iOS-ONLY: asymmetric retouch — blemishes are DARK micro-detail, the
+    // skin's specular sheen (nose bridge, cheekbones, forehead glints) is
+    // BRIGHT micro-detail. Keeping the bright side is what makes the face
+    // read lit and alive instead of flat matte; the dark side still smooths.
+    float sheen = smoothstep(0.01, 0.05, dot(high, LUMA));
+    keep = max(keep, sheen * 0.85);
     float3 smoothed = low + high * keep;
     float3 c = mix(scene, smoothed, u.smooth * skin);
 
@@ -118,7 +124,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float3 localTone = low + (cl - dot(low, LUMA));
     c = mix(c, localTone, u.clarity * skin * 0.7);
     float sl = dot(c, LUMA);
-    c = mix(float3(sl), c, 1.0 + u.clarity * face * 0.08);
+    // iOS-ONLY (Android keeps 0.08): a touch more saturation so the evened
+    // skin keeps warm colour depth — part of the "alive" look.
+    c = mix(float3(sl), c, 1.0 + u.clarity * face * 0.12);
 
     // --- Glow (in-mask part): only a faint skin whitening lives inside the
     // face gate; the visible glow is the GLOBAL bloom below. A flat brightness
@@ -156,30 +164,25 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float darkGuard = smoothstep(0.08, 0.35, dot(outColor, LUMA));
     outColor += float3(0.045, 0.016, -0.026) * (u.warmth * darkGuard);
 
-    // --- Fair skin (glow-driven): pale, porcelain whitening of skin-TONED
+    // --- Fair skin (glow-driven): a GENTLE brightening/evening of skin-TONED
     // pixels across the whole frame — face, ears and neck alike, so there is
     // no mask seam. Detects warm skin hues (r > g > b, mid+ luma so hair/
-    // beard/brows are untouched) and fades them toward a desaturated,
-    // white-lifted version. ---
+    // beard/brows are untouched). Deliberately subtle (matches Android): the
+    // target keeps most of the skin's own hue/saturation — heavier pale
+    // targets turned the face into a flat, doll-like, cartoon mask. ---
     float wLuma = dot(outColor, LUMA);
     float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
                   * smoothstep(0.0, 0.06, outColor.g - outColor.b)
                   * smoothstep(0.15, 0.40, wLuma);
-    // iOS-ONLY TUNING (Android keeps 0.70/0.24/1.0): on the iPhone's flatter
-    // feed, full desaturation read GRAY next to the reference apps (their
-    // skin stays warm-neutral); this keeps the porcelain lift without
-    // flattening.
-    float3 pale = mix(outColor, float3(wLuma), 0.55);
-    pale += (float3(1.0) - pale) * 0.16;
-    outColor = mix(outColor, pale, u.glow * 0.7 * skinHue);
+    float3 pale = mix(outColor, float3(wLuma), 0.35);
+    pale += (float3(1.0) - pale) * 0.10;
+    outColor = mix(outColor, pale, u.glow * 0.5 * skinHue);
     // A small multiplicative gain on the same skin-toned pixels keeps the face
     // reading bright and lit without shifting its (already matched) colour —
     // gain preserves hue/sat where a white-mix pales. Glow-gated like the rest
     // of the fair-skin block: every grade in this shader must vanish at
     // slider 0 so "Reset" means a raw frame.
-    // iOS-ONLY TUNING (Android keeps 0.08): trimmed — the face read a touch
-    // too bright next to the reference.
-    outColor *= 1.0 + 0.06 * skinHue * u.glow;
+    outColor *= 1.0 + 0.04 * skinHue * u.glow;
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
@@ -200,15 +203,17 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // excess on skin-toned pixels (porcelain, not orange) and returns a touch
     // of blue to cool the tone. Glow-gated (it is the companion of the
     // glow-driven fair-skin grade). ---
+    // Kept LIGHT (matches Android): skin needs its warm red component to look
+    // alive — trimming it hard is a big contributor to the cartoon look.
     float warmCast = outColor.r - outColor.g;
-    outColor.r -= warmCast * 0.18 * skinHue * u.glow;
-    outColor.b += warmCast * 0.10 * skinHue * u.glow;
+    outColor.r -= warmCast * 0.08 * skinHue * u.glow;
+    outColor.b += warmCast * 0.04 * skinHue * u.glow;
 
     // --- Bright: gentle global gamma lift so the frame reads light and airy
     // (whiter walls/skin, the reference look). A gamma curve pins black and
     // white, so hair keeps its depth and highlights never clip. Glow-driven
-    // (0.92 at full). ---
-    outColor = pow(clamp(outColor, 0.0, 1.0), float3(1.0 - 0.08 * u.glow));
+    // (0.95 at full). ---
+    outColor = pow(clamp(outColor, 0.0, 1.0), float3(1.0 - 0.05 * u.glow));
 
     // --- Rich blacks: shadow toe applied LAST (the gamma above grays the
     // deepest tones; anything earlier gets re-lifted). Pulls sub-0.35-luma
