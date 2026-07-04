@@ -82,14 +82,15 @@ internal object Shaders {
      *
      * Tone is deliberately light to keep contrast + dynamic range: clarity evens
      * skin colour at CONSTANT luma (no flattening) and keeps skin warm/alive
-     * instead of gray; glow lifts ONLY midtones (never the black point, so no
-     * haze/washout); warmth is a soft GLOBAL grade for a cohesive natural tone.
+     * instead of gray; glow is a GLOBAL highlight bloom (screen blend of the
+     * blurred scene's bright end) plus a faint skin whitening — image-driven,
+     * so there is no mask boundary to see; warmth is a soft GLOBAL grade.
      *
      * [uSkinMask] = oval minus eyes/brows/lips (gates smoothing + tone-even).
-     * [uFaceMask] = full oval (gates glow so the whole face reads cohesive).
+     * [uFaceMask] = full oval (gates the beauty composite).
      *
      * uSmooth   skin-smoothing opacity (0..1)
-     * uGlow     midtone brightness (0..1)
+     * uGlow     highlight bloom + skin brightening (0..1)
      * uClarity  even skin tone + life (0..1)
      * uWarmth   global warm tone (0..1)
      */
@@ -134,17 +135,22 @@ internal object Shaders {
             float sl = dot(c, LUMA);
             c = mix(vec3(sl), c, 1.0 + uClarity * face * 0.08);
 
-            // --- Glow: gentle MIDTONE lift (whole face) + a soft skin whitening
-            // toward a lighter, cleaner tone (skin only, so no background haze) —
-            // matches the reference's slightly brighter/whiter skin. Neither lifts
-            // the black point, so no washed-out haze. ---
-            float lum = dot(c, LUMA);
-            float mid = smoothstep(0.12, 0.55, lum) * (1.0 - smoothstep(0.72, 1.0, lum));
-            c += c * (uGlow * face * 0.13 * mid);
-            c += (vec3(1.0) - c) * (uGlow * skin * 0.06);
+            // --- Glow (in-mask part): only a faint skin whitening lives inside
+            // the face gate; the visible glow is the GLOBAL bloom below. A flat
+            // brightness lift here reads as a bright oval "layer" at the mask
+            // boundary — never add one. ---
+            c += (vec3(1.0) - c) * (uGlow * skin * 0.05);
 
             c = clamp(c, 0.0, 1.0);
             vec3 outColor = mix(scene, c, face);
+
+            // --- Glow (bloom): screen-blend the blurred scene's own soft
+            // highlights over the WHOLE frame. Light spreads where light
+            // already exists — like real optics — so there is no geometric
+            // boundary to see; it reads as better lighting, not a filter.
+            // Blacks are untouched (highlights only), so no washed-out haze. ---
+            vec3 hl = clamp((low - 0.45) / 0.55, 0.0, 1.0);
+            outColor = 1.0 - (1.0 - outColor) * (1.0 - hl * (uGlow * 0.30));
 
             // --- Warmth: soft GLOBAL grade (whole frame) for a cohesive, natural
             // warm tone with no face-oval seam. Faded out on very dark pixels so
@@ -219,13 +225,19 @@ internal object Shaders {
         uniform float uAspect;    // width / height
 
         uniform int uFaceCount;
-        uniform float uMidX[5];   // face midline x
         uniform vec2 uNoseC[5];
         uniform float uNoseR[5];
-        uniform vec2 uJawC[5];
-        uniform float uJawR[5];
-        uniform float uNose;      // nose-slim strength
-        uniform float uSlim;      // face-slim strength
+        uniform float uNose;        // nose-slim strength
+        uniform float uSlim;        // face-slim strength
+
+        // Face slim: pinch points pinned to the jawline landmarks (below the
+        // eyes down to the chin). uJawD is the full-slider sampling shift
+        // (points AWAY from the face midline; sampling outward moves the
+        // silhouette inward). Radii are aspect-corrected.
+        uniform int uJawCount;
+        uniform vec2 uJawP[16];
+        uniform vec2 uJawD[16];
+        uniform float uJawR[16];
 
         uniform int uEyeCount;
         uniform vec2 uEyes[10];
@@ -244,6 +256,27 @@ internal object Shaders {
             return uv;
         }
 
+        // Face slim: sum of localized jaw-contour pinches. Each pinch shifts
+        // sampling horizontally away from the face midline inside its own small
+        // radius, so the jaw/cheek silhouette moves INWARD and everything
+        // outside the thin band around the jawline (background, hair, the other
+        // side of the frame) stays put. Overlapping falloffs are normalized
+        // (divide by the weight sum when it exceeds 1) so adjacent pinches
+        // blend along the contour instead of stacking.
+        vec2 slimJaw(vec2 uv, float s) {
+            if (uJawCount <= 0 || s <= 0.0) return uv;
+            vec2 sumD = vec2(0.0);
+            float sumW = 0.0;
+            for (int i = 0; i < 16; i++) {
+                if (i >= uJawCount) break;
+                float dist = length(vec2((uv.x - uJawP[i].x) * uAspect, uv.y - uJawP[i].y));
+                float f = 1.0 - smoothstep(0.0, 1.0, dist / uJawR[i]);
+                sumD += uJawD[i] * f;
+                sumW += f;
+            }
+            return uv + sumD * (s / max(sumW, 1.0));
+        }
+
         // Sample nearer a center inside a soft region (magnify). Max ~18% at full.
         vec2 magnify(vec2 uv, vec2 c, float r, float s) {
             if (r <= 0.0 || s <= 0.0) return uv;
@@ -258,9 +291,10 @@ internal object Shaders {
 
         void main() {
             vec2 uv = vUV;
+            // Slim the jaw/cheek contour (below the eyes only; face-local).
+            uv = slimJaw(uv, uSlim);
             for (int i = 0; i < 5; i++) {
                 if (i >= uFaceCount) break;
-                uv = pullX(uv, uJawC[i], uJawR[i], uMidX[i], uSlim);
                 uv = pullX(uv, uNoseC[i], uNoseR[i], uNoseC[i].x, uNose);
             }
             for (int i = 0; i < 10; i++) {

@@ -46,15 +46,15 @@ class BeautyCameraView(context: Context, appContext: AppContext) : ExpoView(cont
         // Model loading (~4 MB) happens off the main thread.
         analysisExecutor.execute {
             tracker = try {
-                // Decoupled: every frame is displayed immediately (full FPS) while
-                // detection runs on its own thread and publishes landmarks async.
+                // Frame-locked: detection runs on each frame and the frame is
+                // rendered together with its own landmarks, so the warp never
+                // slides off the face during motion.
                 FaceTracker(
                     context,
-                    onFrame = { bitmap ->
-                        renderer.submitFrame(bitmap)
+                    onFrame = { bitmap, faces ->
+                        renderer.submitFrame(bitmap, faces)
                         glView.requestRender()
                     },
-                    onFaces = { faces -> renderer.setFaces(faces) },
                 ).also { it.isFrontCamera = facingFront }
             } catch (t: Throwable) {
                 Log.e(TAG, "FaceTracker init failed; filters will be inactive", t)

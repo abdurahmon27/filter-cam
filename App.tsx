@@ -15,7 +15,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <View style={styles.root}>
-        <StatusBar style="light" />
+        <StatusBar style="light" hidden />
         {screen === 'home' ? (
           <HomeScreen onOpenCamera={() => setScreen('camera')} />
         ) : (

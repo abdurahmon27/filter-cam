@@ -15,13 +15,12 @@ import javax.microedition.khronos.opengles.GL10
 /**
  * Orchestrates the per-frame beauty pipeline on the GL thread.
  *
- * **Decoupled display + detection:** each camera frame is uploaded to a 2D
- * texture and displayed immediately via [submitFrame] (so the preview runs at the
- * full camera frame rate), while the landmarks arrive separately via [setFaces]
- * from a background detection thread. The renderer always filters the newest frame
- * with the newest landmarks; per-frame landmark smoothing keeps the
- * mask/mustache/reshape stable when detection lags the displayed frame by a frame
- * or two during fast motion.
+ * **Frame-locked display + detection:** each camera frame arrives via
+ * [submitFrame] *together with the landmarks detected on that exact frame*, and
+ * the two are swapped in atomically on the GL thread. The warp therefore never
+ * slides off the face during motion — the whole pipeline (image + effect) is
+ * delayed together by the detect time, which is invisible, instead of the
+ * effect lagging the image, which is not.
  *
  * Pipeline per frame:
  *  1. [CameraPass]     — frame texture -> scene FBO (cover-crop, y-flip).
@@ -51,7 +50,8 @@ internal class BeautyRenderer(
     // ---- frame + its paired landmarks (submitted together) ----
     private val frameLock = Any()
     private var pendingBitmap: Bitmap? = null
-    @Volatile private var faces: Array<FloatArray> = emptyArray()
+    private var pendingFaces: Array<FloatArray> = emptyArray()
+    private var faces: Array<FloatArray> = emptyArray() // GL thread only
     @Volatile private var pendingCapture: ((Bitmap) -> Unit)? = null
 
     private var frameTexture = 0
@@ -86,21 +86,17 @@ internal class BeautyRenderer(
     private var streamOutput: StreamOutput? = null
 
     /**
-     * Deliver a camera frame (already rotated/mirrored to display orientation) for
-     * display. Called from the analyzer thread every frame; uploaded + rendered on
-     * the GL thread. Ownership of [bitmap] transfers here (recycled after upload).
-     * Detection is decoupled — landmarks arrive separately via [setFaces].
+     * Deliver a camera frame (already rotated/mirrored to display orientation)
+     * together with the landmarks detected on that exact frame. Called from the
+     * analyzer thread every frame; uploaded + rendered on the GL thread.
+     * Ownership of [bitmap] transfers here (recycled after upload).
      */
-    fun submitFrame(bitmap: Bitmap) {
+    fun submitFrame(bitmap: Bitmap, faces: Array<FloatArray>) {
         synchronized(frameLock) {
             pendingBitmap?.recycle() // drop an un-consumed previous frame
             pendingBitmap = bitmap
+            pendingFaces = faces
         }
-    }
-
-    /** Publish the latest detected landmarks (from the background detection thread). */
-    fun setFaces(faces: Array<FloatArray>) {
-        this.faces = faces
     }
 
     fun setStreamSurface(surface: android.view.Surface?) {
@@ -138,10 +134,13 @@ internal class BeautyRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        // Upload the latest frame (if any) to the frame texture.
+        // Upload the latest frame (if any) to the frame texture, adopting its
+        // paired landmarks in the same swap. A redraw without a new frame (e.g.
+        // takePicture) keeps the previous frame's landmarks — still matched.
         val bmp = synchronized(frameLock) {
             val b = pendingBitmap
             pendingBitmap = null
+            if (b != null) faces = pendingFaces
             b
         }
         if (bmp != null) {

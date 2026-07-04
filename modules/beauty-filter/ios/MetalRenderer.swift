@@ -49,6 +49,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private static let maxFaces = 5
     private static let maxEyes = 10 // 5 faces x 2 eyes
+    private static let maxJaw = 16  // shared pool of jaw pinch points (~10/face)
+
+    // Face-slim tuning, in fractions of the inter-eye distance. Keep in sync
+    // with Android's FaceReshapePass (SLIM_AMP / SLIM_RADIUS). 0.042 chosen by
+    // feel on device: the previous 0.14 max was caricature-strong (its 30%
+    // point is the new 100%).
+    private static let slimAmp: Float = 0.042
+    private static let slimRadius: Float = 0.55
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -88,19 +96,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cropScaleY: Float = 1
 
     // Reshape uniform scratch (fixed-size so the buffers are always bound).
-    private var reMidX = [Float](repeating: 0, count: maxFaces)
     private var reNoseC = [SIMD2<Float>](repeating: .zero, count: maxFaces)
     private var reNoseR = [Float](repeating: 0, count: maxFaces)
-    private var reJawC = [SIMD2<Float>](repeating: .zero, count: maxFaces)
-    private var reJawR = [Float](repeating: 0, count: maxFaces)
+    private var reJawP = [SIMD2<Float>](repeating: .zero, count: maxJaw) // jaw pinch anchors
+    private var reJawD = [SIMD2<Float>](repeating: .zero, count: maxJaw) // full-slider sampling shift
+    private var reJawR = [Float](repeating: 0, count: maxJaw)            // pinch falloff radii
     private var reEyes = [SIMD2<Float>](repeating: .zero, count: maxEyes)
     private var reEyeR = [Float](repeating: 0, count: maxEyes)
 
-    // Latest inputs, guarded by locks (written from camera / vision queues).
+    // Latest frame + its paired landmarks, swapped in together (frame-locked;
+    // written from the camera sample queue).
     private let bufferLock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
-
-    private let landmarkLock = NSLock()
     private var faces: [FaceLandmarks] = []
 
     // Capture
@@ -120,6 +127,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var aspect: Float
         var faceCount: Int32
         var eyeCount: Int32
+        var jawCount: Int32
         var nose: Float
         var slim: Float
         var eye: Float
@@ -203,18 +211,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     // MARK: - Inputs
 
-    func updatePixelBuffer(_ buffer: CVPixelBuffer) {
+    /// Deliver a camera frame together with the landmarks detected on that
+    /// exact frame (frame-locked, mirrors Android's submitFrame). Empty faces
+    /// = no face detected.
+    func submitFrame(_ buffer: CVPixelBuffer, faces: [FaceLandmarks]) {
         bufferLock.lock()
         latestPixelBuffer = buffer
-        bufferLock.unlock()
-    }
-
-    /// Publish the latest detected faces (empty = no faces). Mirrors Android's
-    /// setFaces; the renderer always filters the newest frame with these.
-    func setFaces(_ faces: [FaceLandmarks]) {
-        landmarkLock.lock()
         self.faces = faces
-        landmarkLock.unlock()
+        bufferLock.unlock()
     }
 
     /// Capture the next rendered frame as a UIImage. Callback fires on a
@@ -236,20 +240,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         guard sceneTex != nil, finalTex != nil else { return }
 
-        // Grab latest camera buffer -> Metal texture.
+        // Grab the latest camera buffer AND its paired landmarks in one
+        // snapshot, so the warp always matches the pixels it is applied to.
         bufferLock.lock()
         let buffer = latestPixelBuffer
+        let lms = faces
         bufferLock.unlock()
         guard let pixelBuffer = buffer,
               let cameraCV = makeCameraTexture(pixelBuffer),
               let cameraTexture = CVMetalTextureGetTexture(cameraCV) else { return }
 
         updateCrop(cameraWidth: cameraTexture.width, cameraHeight: cameraTexture.height)
-
-        // Snapshot the latest faces (used by masks/reshape/overlays).
-        landmarkLock.lock()
-        let lms = faces
-        landmarkLock.unlock()
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let drawable = view.currentDrawable else { return }
@@ -436,6 +437,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let aspect = Float(viewWidth) / Float(max(viewHeight, 1))
         var faceCount = 0
         var eyeCount = 0
+        var jawCount = 0
         let reshapesActive = eyeEnlarge > 0 || noseSlim > 0 || faceSlim > 0
 
         if reshapesActive {
@@ -446,51 +448,95 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 let dx = (le.x - re.x) * aspect
                 let dy = le.y - re.y
                 let scale = (dx * dx + dy * dy).squareRoot()
+                let mid = (le.x + re.x) / 2
 
-                reMidX[faceCount] = (le.x + re.x) / 2
                 reNoseC[faceCount] = SIMD2<Float>(visX(f.noseCenter), visY(f.noseCenter))
                 reNoseR[faceCount] = scale * 0.42
-
-                // Jaw from the face-oval extremes (cheeks = x extremes, chin =
-                // lowest y). Android reads CHEEK_LEFT/RIGHT + CHIN rings.
-                if let cheekL = f.faceOval.min(by: { $0.x < $1.x }),
-                   let cheekR = f.faceOval.max(by: { $0.x < $1.x }),
-                   let chin = f.faceOval.max(by: { $0.y < $1.y }) {
-                    let jcx = (visX(cheekL) + visX(cheekR)) / 2
-                    let cheekY = (visY(cheekL) + visY(cheekR)) / 2
-                    let chinY = visY(chin)
-                    reJawC[faceCount] = SIMD2<Float>(jcx, cheekY + (chinY - cheekY) * 0.45)
-                    reJawR[faceCount] = scale * 1.25
-                } else {
-                    reJawC[faceCount] = SIMD2<Float>(reMidX[faceCount], reNoseC[faceCount].y)
-                    reJawR[faceCount] = 0
-                }
                 faceCount += 1
 
                 if eyeEnlarge > 0 {
                     if eyeCount < Self.maxEyes { reEyes[eyeCount] = le; reEyeR[eyeCount] = leR; eyeCount += 1 }
                     if eyeCount < Self.maxEyes { reEyes[eyeCount] = re; reEyeR[eyeCount] = reR; eyeCount += 1 }
                 }
+
+                // Face slim (see reshape_slimJaw): pinch anchors pinned to the
+                // face-oval points below the eye line, so only the band along
+                // the jaw/cheek silhouette moves. Weights fade in below the
+                // eyes (wy) and fade out at the midline (wx — the chin is never
+                // pulled sideways); mirrors Android's FaceReshapePass, which
+                // reads fixed jawline mesh indices.
+                if faceSlim > 0, scale > 1e-4,
+                   let chin = f.faceOval.max(by: { $0.y < $1.y }) {
+                    let eyeY = (le.y + re.y) / 2
+                    let chinY = visY(chin)
+                    let span = abs(chinY - eyeY)   // eye-to-chin height (vis, y-down)
+                    if span > 1e-4 {
+                        var left: [(p: SIMD2<Float>, w: Float)] = []
+                        var right: [(p: SIMD2<Float>, w: Float)] = []
+                        for pt in f.faceOval {
+                            let px = visX(pt)
+                            let py = visY(pt)
+                            let t = (py - eyeY) / span
+                            let wy = Self.smoothstep(0.10, 0.40, t)
+                            let wx = Self.smoothstep(0.10, 0.30, abs(px - mid) * aspect / scale)
+                            let w = wy * wx
+                            if w < 0.02 { continue }
+                            if px < mid {
+                                left.append((SIMD2<Float>(px, py), w))
+                            } else {
+                                right.append((SIMD2<Float>(px, py), w))
+                            }
+                        }
+                        for side in [left, right] {
+                            let alongJaw = side.sorted { $0.p.y < $1.p.y }
+                            for (p, w) in Self.pickEvenly(alongJaw, 5) {
+                                if jawCount >= Self.maxJaw { break }
+                                reJawP[jawCount] = p
+                                // Full-slider sampling shift, AWAY from the
+                                // midline (sampling outward moves the
+                                // silhouette inward).
+                                let dir: Float = p.x < mid ? -1 : 1
+                                reJawD[jawCount] = SIMD2<Float>(dir * scale * Self.slimAmp * w / aspect, 0)
+                                reJawR[jawCount] = scale * Self.slimRadius
+                                jawCount += 1
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Nose/jaw uniforms only feed the shader when those warps are active.
-        let faceN = (noseSlim > 0 || faceSlim > 0) ? faceCount : 0
+        // Nose uniforms only feed the shader when that warp is active (slim is
+        // gated by jawCount).
+        let faceN = noseSlim > 0 ? faceCount : 0
 
         renderFullscreen(commandBuffer, target: finalTex, pipeline: reshapePipeline, clear: false) { encoder in
             var sc = ReshapeScalars(aspect: aspect, faceCount: Int32(faceN),
-                                    eyeCount: Int32(eyeCount), nose: clamp01(noseSlim),
-                                    slim: clamp01(faceSlim), eye: clamp01(eyeEnlarge))
+                                    eyeCount: Int32(eyeCount), jawCount: Int32(jawCount),
+                                    nose: clamp01(noseSlim), slim: clamp01(faceSlim),
+                                    eye: clamp01(eyeEnlarge))
             encoder.setFragmentTexture(outputTex, index: 0)
             encoder.setFragmentBytes(&sc, length: MemoryLayout<ReshapeScalars>.stride, index: 0)
-            encoder.setFragmentBytes(&reMidX, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 1)
-            encoder.setFragmentBytes(&reNoseC, length: Self.maxFaces * MemoryLayout<SIMD2<Float>>.stride, index: 2)
-            encoder.setFragmentBytes(&reNoseR, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 3)
-            encoder.setFragmentBytes(&reJawC, length: Self.maxFaces * MemoryLayout<SIMD2<Float>>.stride, index: 4)
-            encoder.setFragmentBytes(&reJawR, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 5)
+            encoder.setFragmentBytes(&reNoseC, length: Self.maxFaces * MemoryLayout<SIMD2<Float>>.stride, index: 1)
+            encoder.setFragmentBytes(&reNoseR, length: Self.maxFaces * MemoryLayout<Float>.stride, index: 2)
+            encoder.setFragmentBytes(&reJawP, length: Self.maxJaw * MemoryLayout<SIMD2<Float>>.stride, index: 3)
+            encoder.setFragmentBytes(&reJawD, length: Self.maxJaw * MemoryLayout<SIMD2<Float>>.stride, index: 4)
+            encoder.setFragmentBytes(&reJawR, length: Self.maxJaw * MemoryLayout<Float>.stride, index: 5)
             encoder.setFragmentBytes(&reEyes, length: Self.maxEyes * MemoryLayout<SIMD2<Float>>.stride, index: 6)
             encoder.setFragmentBytes(&reEyeR, length: Self.maxEyes * MemoryLayout<Float>.stride, index: 7)
         }
+    }
+
+    /// GLSL-style smoothstep.
+    private static func smoothstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+        let t = min(max((x - e0) / (e1 - e0), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
+    /// Up to `k` items spread evenly across `items` (all of them when fewer).
+    private static func pickEvenly<T>(_ items: [T], _ k: Int) -> [T] {
+        guard items.count > k, k > 1 else { return items }
+        return (0..<k).map { items[$0 * (items.count - 1) / (k - 1)] }
     }
 
     private func drawMustache(_ commandBuffer: MTLCommandBuffer, _ lms: FaceLandmarks) {

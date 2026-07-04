@@ -70,11 +70,12 @@ fragment float4 blur_fragment(FSOut in [[stage_in]],
 // A natural, edge-preserving skin retouch via frequency separation: the
 // high-frequency detail (scene - low) is kept in full at real edges and only
 // partly on flat skin, blended over the original by (smooth * skin mask).
-// Clarity evens skin colour at constant luma; glow lifts midtones; warmth is a
+// Clarity evens skin colour at constant luma; glow is a global highlight bloom
+// (image-driven, no mask boundary) plus a faint skin whitening; warmth is a
 // soft global grade; a final micro-contrast/vibrance pass keeps the image alive.
 //
 //   skinMask = oval minus eyes/brows/lips (gates smoothing + tone-even)
-//   faceMask = full oval               (gates glow so the whole face is cohesive)
+//   faceMask = full oval                  (gates the beauty composite)
 struct BeautyUniforms {
     float smooth;
     float glow;
@@ -112,14 +113,19 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float sl = dot(c, LUMA);
     c = mix(float3(sl), c, 1.0 + u.clarity * face * 0.08);
 
-    // --- Glow: gentle midtone lift (whole face) + soft skin whitening. ---
-    float lum = dot(c, LUMA);
-    float mid = smoothstep(0.12, 0.55, lum) * (1.0 - smoothstep(0.72, 1.0, lum));
-    c += c * (u.glow * face * 0.13 * mid);
-    c += (float3(1.0) - c) * (u.glow * skin * 0.06);
+    // --- Glow (in-mask part): only a faint skin whitening lives inside the
+    // face gate; the visible glow is the GLOBAL bloom below. A flat brightness
+    // lift here reads as a bright oval "layer" at the mask boundary. ---
+    c += (float3(1.0) - c) * (u.glow * skin * 0.05);
 
     c = clamp(c, 0.0, 1.0);
     float3 outColor = mix(scene, c, face);
+
+    // --- Glow (bloom): screen-blend the blurred scene's own soft highlights
+    // over the WHOLE frame (port of Android). Light spreads where light
+    // already exists, so there is no geometric boundary to see. ---
+    float3 hl = clamp((low - 0.45) / 0.55, 0.0, 1.0);
+    outColor = 1.0 - (1.0 - outColor) * (1.0 - hl * (u.glow * 0.30));
 
     // --- Warmth: soft global grade, faded out on dark pixels so hair/brows/
     // beard keep their true colour. ---
@@ -172,8 +178,9 @@ fragment float4 passthrough_fragment(FSOut in [[stage_in]],
 
 struct ReshapeScalars {
     float aspect;    // width / height
-    int faceCount;   // active nose/jaw faces
+    int faceCount;   // active nose faces
     int eyeCount;    // active eyes
+    int jawCount;    // active jaw pinch points (face slim)
     float nose;      // nose-slim strength
     float slim;      // face-slim strength
     float eye;       // eye-enlarge strength
@@ -188,6 +195,31 @@ static inline float2 reshape_pullX(float2 uv, float2 c, float r, float axisX,
         uv.x = axisX + (uv.x - axisX) * (1.0 + s * 0.30 * f);
     }
     return uv;
+}
+
+// Face slim: sum of localized jaw-contour pinches (port of Android slimJaw).
+// Each pinch shifts sampling horizontally away from the face midline inside its
+// own small radius, so the jaw/cheek silhouette moves INWARD and everything
+// outside the thin band around the jawline (background, hair, the other side of
+// the frame) stays put. Overlapping falloffs are normalized (divide by the
+// weight sum when it exceeds 1) so adjacent pinches blend along the contour
+// instead of stacking. jawD is the full-slider sampling shift.
+static inline float2 reshape_slimJaw(float2 uv, int jawCount,
+                                     constant float2 *jawP,
+                                     constant float2 *jawD,
+                                     constant float *jawR,
+                                     float s, float aspect) {
+    if (jawCount <= 0 || s <= 0.0) return uv;
+    float2 sumD = float2(0.0);
+    float sumW = 0.0;
+    for (int i = 0; i < 16; i++) {
+        if (i >= jawCount) break;
+        float dist = length(float2((uv.x - jawP[i].x) * aspect, uv.y - jawP[i].y));
+        float f = 1.0 - smoothstep(0.0, 1.0, dist / jawR[i]);
+        sumD += jawD[i] * f;
+        sumW += f;
+    }
+    return uv + sumD * (s / max(sumW, 1.0));
 }
 
 static inline float2 reshape_magnify(float2 uv, float2 c, float r, float s,
@@ -205,18 +237,19 @@ static inline float2 reshape_magnify(float2 uv, float2 c, float r, float s,
 fragment float4 reshape_fragment(FSOut in [[stage_in]],
                                  texture2d<float> tex [[texture(0)]],
                                  constant ReshapeScalars &sc [[buffer(0)]],
-                                 constant float  *midX  [[buffer(1)]],
-                                 constant float2 *noseC [[buffer(2)]],
-                                 constant float  *noseR [[buffer(3)]],
-                                 constant float2 *jawC  [[buffer(4)]],
+                                 constant float2 *noseC [[buffer(1)]],
+                                 constant float  *noseR [[buffer(2)]],
+                                 constant float2 *jawP  [[buffer(3)]],
+                                 constant float2 *jawD  [[buffer(4)]],
                                  constant float  *jawR  [[buffer(5)]],
                                  constant float2 *eyes  [[buffer(6)]],
                                  constant float  *eyeR  [[buffer(7)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float2 uv = in.uv;
+    // Slim the jaw/cheek contour (below the eyes only; face-local).
+    uv = reshape_slimJaw(uv, sc.jawCount, jawP, jawD, jawR, sc.slim, sc.aspect);
     for (int i = 0; i < 5; i++) {
         if (i >= sc.faceCount) break;
-        uv = reshape_pullX(uv, jawC[i], jawR[i], midX[i], sc.slim, sc.aspect);
         uv = reshape_pullX(uv, noseC[i], noseR[i], noseC[i].x, sc.nose, sc.aspect);
     }
     for (int i = 0; i < 10; i++) {

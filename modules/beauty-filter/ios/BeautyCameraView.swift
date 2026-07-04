@@ -5,11 +5,14 @@
 //  ExpoView that owns the capture session, the Metal preview, and the face
 //  tracker, wiring them together. Counterpart to Android's BeautyCameraView.kt.
 //
-//  Data flow per frame:
+//  Data flow per frame (frame-locked, mirrors Android):
 //    CameraController -> CVPixelBuffer
-//        -> MetalRenderer.updatePixelBuffer  (drawn on the next setNeedsDisplay)
-//        -> FaceTracker.track                (Vision, async, keep-only-latest)
-//    FaceTracker -> [FaceLandmarks] -> MetalRenderer.setFaces
+//        -> FaceTracker.detect              (Vision, synchronous on that frame)
+//        -> MetalRenderer.submitFrame       (frame + its landmarks, together)
+//        -> mtkView.setNeedsDisplay
+//
+//  Backpressure: alwaysDiscardsLateVideoFrames drops camera frames if
+//  detection makes us late — fps dips slightly, the warp never misaligns.
 //
 
 import ExpoModulesCore
@@ -61,12 +64,9 @@ final class BeautyCameraView: ExpoView {
     private func wire() {
         camera.onPixelBuffer = { [weak self] buffer in
             guard let self = self else { return }
-            self.renderer?.updatePixelBuffer(buffer)
-            self.faceTracker.track(pixelBuffer: buffer)
+            let faces = self.faceTracker.detect(pixelBuffer: buffer)
+            self.renderer?.submitFrame(buffer, faces: faces)
             DispatchQueue.main.async { self.mtkView?.setNeedsDisplay() }
-        }
-        faceTracker.onLandmarks = { [weak self] faces in
-            self?.renderer?.setFaces(faces)
         }
     }
 

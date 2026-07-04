@@ -67,8 +67,8 @@ export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
   smooth: 0.7,
   glow: 0.4,
   clarity: 0.55,
-  warm: 0.15,
+  warm: 0.08,
   eyes: 0.15,
   nose: 0.1,
-  slim: 0.32,
+  slim: 0.42,
 };
