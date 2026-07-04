@@ -123,9 +123,7 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // --- Glow (in-mask part): only a faint skin whitening lives inside the
     // face gate; the visible glow is the GLOBAL bloom below. A flat brightness
     // lift here reads as a bright oval "layer" at the mask boundary.
-    // iOS-ONLY TUNING (Android keeps 0.05): a touch more in-face lift to match
-    // the reference's brighter, more even face. ---
-    c += (float3(1.0) - c) * (u.glow * skin * 0.07);
+    c += (float3(1.0) - c) * (u.glow * skin * 0.05);
 
     c = clamp(c, 0.0, 1.0);
     float3 outColor = mix(scene, c, face);
@@ -176,7 +174,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // gain preserves hue/sat where a white-mix pales. Glow-gated like the rest
     // of the fair-skin block: every grade in this shader must vanish at
     // slider 0 so "Reset" means a raw frame.
-    outColor *= 1.0 + 0.08 * skinHue * u.glow;
+    // iOS-ONLY TUNING (Android keeps 0.08): trimmed — the face read a touch
+    // too bright next to the reference.
+    outColor *= 1.0 + 0.06 * skinHue * u.glow;
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
