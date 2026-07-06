@@ -302,16 +302,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float toeL = dot(outColor, LUMA);
     outColor *= 1.0 - 0.20 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
-    // --- Background = RAW camera (face-only beautify) ---
-    // The reference app ONLY beautifies the face; the background is the raw
-    // camera feed. But several grades above run GLOBALLY (glow brightness lift,
-    // bloom, vibrance/contrast, shadow toe), so our background never matched
-    // theirs — different colour, brightness and contrast on the walls/ceiling.
-    // Blend the fully-graded result back to the raw `scene` everywhere OUTSIDE
-    // the feathered face mask: face = full beautify, background = untouched
-    // camera. `face` is feathered, so the transition is soft (no hard oval).
-    // This must be the LAST step — anything added after it would hit the bg again.
-    outColor = mix(scene, outColor, face);
+    // NOTE: do NOT hard-gate the whole composite to the `face` mask here. Doing
+    // so left a visible oval SEAM — a bright, smooth face patch on a raw neck/
+    // background — which reads instantly as "a filter". The reference blends
+    // seamlessly across the frame. Background colour is kept close to raw by
+    // NOT running any global colour/warm tint (WB removed, Warm defaults 0); the
+    // only global grades left are gentle brightness/bloom/contrast, which are
+    // seamless. Skin-tone warmth stays skinHue-gated (skin only, no wall tint).
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
