@@ -112,8 +112,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float lowL  = dot(low, LUMA);       // local skin brightness (bright cheek vs dark beard)
 
     float structure = smoothstep(0.045, 0.15, amp);
-    // Floor 0.40: MODERATE smoothing that KEEPS skin texture — natural, not waxy.
-    float keep = mix(0.40, 1.0, structure);
+    // Floor 0.32: smoother than 0.40 (the target's complexion is cleaner) while
+    // staying well above the waxy 0.18. The tight structure band still keeps the
+    // face's real lines sharp, so this only cleans genuinely flat skin further.
+    float keep = mix(0.32, 1.0, structure);
 
     // --- Mole / blemish / blotch remover (iOS-ONLY) ---
     // A mole is a distinct DARK spot, so the amp detector above mistakes it for
@@ -127,8 +129,8 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // The old `defShadow` term did the OPPOSITE (it preserved dark detail) and
     // is removed — it was the main reason moles survived.
     float onBrightSkin = smoothstep(0.34, 0.55, lowL);
-    float darkSpot = smoothstep(0.02, 0.10, -highL) * onBrightSkin;
-    keep = mix(keep, 0.12, darkSpot);
+    float darkSpot = smoothstep(0.015, 0.09, -highL) * onBrightSkin;
+    keep = mix(keep, 0.08, darkSpot);
 
     // Preserve bright specular sheen LAST so a spot-remove can never dull the
     // face's natural highlights.
@@ -245,9 +247,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // target. The correct move for pink-white skin is to trim the yellow/green
     // (de-orange) with only a small red lift and a hair of blue back, so the
     // undertone reads rosy rather than tan.
-    outColor.r += 0.028 * rosy;
-    outColor.g -= 0.032 * rosy;
-    outColor.b += 0.008 * rosy;
+    outColor.r += 0.036 * rosy;
+    outColor.g -= 0.042 * rosy;
+    outColor.b += 0.010 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:

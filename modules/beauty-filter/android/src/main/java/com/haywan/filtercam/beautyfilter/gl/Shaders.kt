@@ -136,6 +136,17 @@ internal object Shaders {
             // stubble shadow) that the face still reads REAL at high sliders —
             // lower floors flatten it into a plastic, cartoon-like mask.
             float keep = mix(0.35, 1.0, edge);
+            // --- Mole / blemish / blotch remover ---
+            // A mole is a distinct DARK spot, so `amp` mistakes it for an edge
+            // and PROTECTS it. Wherever a DARK detail (highL < 0) sits on BRIGHT
+            // skin (lowL high), force keep down so the spot melts into the
+            // complexion. Gated to bright skin so the dark beard/hair (dark
+            // detail on DARK surroundings) is spared, not blurred to mush.
+            float highL = dot(high, LUMA);
+            float lowL  = dot(low, LUMA);
+            float onBrightSkin = smoothstep(0.34, 0.55, lowL);
+            float darkSpot = smoothstep(0.015, 0.09, -highL) * onBrightSkin;
+            keep = mix(keep, 0.08, darkSpot);
             vec3 smoothed = low + high * keep;
             // Opacity blend over the ORIGINAL, skin mask only.
             vec3 c = mix(scene, smoothed, uSmooth * skin);
@@ -234,9 +245,9 @@ internal object Shaders {
             // blue pushes skin yellow-orange; the correct move for pink-white
             // skin is to trim the yellow/green (de-orange) with a small red lift
             // and a hair of blue back, so the undertone reads rosy not tan.
-            outColor.r += 0.028 * rosy;
-            outColor.g -= 0.032 * rosy;
-            outColor.b += 0.008 * rosy;
+            outColor.r += 0.036 * rosy;
+            outColor.g -= 0.042 * rosy;
+            outColor.b += 0.010 * rosy;
 
             // --- Bright: gentle global gamma lift so the frame reads light and
             // airy (whiter walls/skin, the reference look). A gamma curve pins
