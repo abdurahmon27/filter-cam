@@ -302,12 +302,16 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float toeL = dot(outColor, LUMA);
     outColor *= 1.0 - 0.20 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
-    // NOTE: an always-on GLOBAL warm white-balance used to live here. REMOVED —
-    // it warmed the WHOLE frame (walls/ceiling/shirt), but the reference app
-    // only beautifies the FACE and leaves the background as the raw camera feed.
-    // Warmth now comes solely from the skinHue-gated skin tint earlier in this
-    // pass, which touches skin-toned pixels (face/neck) only — so the background
-    // stays raw/cool like the target. Do NOT re-add a global tint here.
+    // --- Background = RAW camera (face-only beautify) ---
+    // The reference app ONLY beautifies the face; the background is the raw
+    // camera feed. But several grades above run GLOBALLY (glow brightness lift,
+    // bloom, vibrance/contrast, shadow toe), so our background never matched
+    // theirs — different colour, brightness and contrast on the walls/ceiling.
+    // Blend the fully-graded result back to the raw `scene` everywhere OUTSIDE
+    // the feathered face mask: face = full beautify, background = untouched
+    // camera. `face` is feathered, so the transition is soft (no hard oval).
+    // This must be the LAST step — anything added after it would hit the bg again.
+    outColor = mix(scene, outColor, face);
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
