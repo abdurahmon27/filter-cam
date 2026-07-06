@@ -201,7 +201,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // iOS-ONLY: one notch whiter than the softest tuning (0.35/0.10/0.5) —
     // the reference reads a little paler — while staying far from the heavy
     // 0.70/0.24/1.0 that flattened the face into a doll mask.
-    float3 pale = mix(outColor, float3(wLuma), 0.40);
+    // Desat eased 0.40->0.32: pulling skin so far toward gray was stripping the
+    // healthy RED undertone the target keeps — less graying here lets the rosy
+    // tint below read as pink-white rather than a flat pale.
+    float3 pale = mix(outColor, float3(wLuma), 0.32);
     pale += (float3(1.0) - pale) * 0.14;
     outColor = mix(outColor, pale, u.glow * 0.6 * skinHue);
     // A small multiplicative gain on the same skin-toned pixels keeps the face
@@ -226,16 +229,19 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
     outColor *= 1.0 - u.sharp * 0.05 * shadow;
 
-    // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot re-add
-    // the warm cast the fair-skin grade removed. Trims the red-over-green
-    // excess on skin-toned pixels (porcelain, not orange) and returns a touch
-    // of blue to cool the tone. Glow-gated (it is the companion of the
-    // glow-driven fair-skin grade). ---
-    // Kept LIGHT (matches Android): skin needs its warm red component to look
-    // alive — trimming it hard is a big contributor to the cartoon look.
-    float warmCast = outColor.r - outColor.g;
-    outColor.r -= warmCast * 0.08 * skinHue * u.glow;
-    outColor.b += warmCast * 0.04 * skinHue * u.glow;
+    // --- Rosy skin: the reference's fair skin carries a healthy RED/pink
+    // undertone ("red via white"), not the neutral/sallow tone ours had. The
+    // OLD code here did the opposite — it trimmed red and ADDED blue to cool
+    // the skin, which is exactly why ours read colder. Now we lift red a touch
+    // and trim a hint of blue on skin-toned pixels, so fair skin reads
+    // pink-white like the target. Runs AFTER vibrance/contrast so they cannot
+    // undo it. Glow-gated (companion of the glow-driven fair-skin whitening),
+    // and rolled off on the very brightest skin (highlightGuard) so the nose/
+    // forehead glints stay clean white instead of turning pink. iOS-ONLY. ---
+    float highlightGuard = 1.0 - smoothstep(0.72, 0.92, dot(outColor, LUMA));
+    float rosy = skinHue * u.glow * highlightGuard;
+    outColor.r += 0.055 * rosy;
+    outColor.b -= 0.022 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:
