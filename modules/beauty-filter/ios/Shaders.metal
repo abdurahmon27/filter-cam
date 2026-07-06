@@ -297,6 +297,21 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float toeL = dot(outColor, LUMA);
     outColor *= 1.0 - 0.20 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
+    // --- Global warm white-balance (iOS-ONLY, ALWAYS-ON) ---
+    // The iPhone front camera runs COOL; the reference app warms the WHOLE frame
+    // (walls, skin, shirt), which is the last thing separating ours from theirs.
+    // This is deliberately the ONE grade NOT tied to a slider (approved) — it
+    // shifts the base white balance warm so the frame matches the target out of
+    // the box; "Reset" is therefore warm-corrected, not the raw sensor frame.
+    // A symmetric R-up / B-down tilt reads as a clean warm cast (an amber tilt,
+    // not a yellow wash). Luma-gated so deep shadows / hair / brows stay neutral
+    // and only mid-tones-and-up (walls, skin) warm. Kept subtle so whites stay
+    // clean. Tune the 0.022 up/down for more/less overall warmth.
+    float wbGuard = smoothstep(0.06, 0.30, dot(outColor, LUMA));
+    outColor.r += 0.022 * wbGuard;
+    outColor.g += 0.005 * wbGuard;
+    outColor.b -= 0.022 * wbGuard;
+
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
 
