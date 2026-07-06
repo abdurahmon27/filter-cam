@@ -99,20 +99,38 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float face   = faceTex.sample(s, in.uv).r;
 
     // --- Edge-aware skin smoothing (frequency separation) ---
-    // Keep floor 0.35 (matches Android): enough texture survives on flat skin
-    // (pores, stubble shadow) that the face still reads REAL at high sliders —
-    // the earlier 0.22 floor cleaned complexion harder but flattened the face
-    // into a plastic, cartoon-like mask. Edges keep full detail.
+    // iOS-ONLY (Android keeps floor 0.35, band 0.065/0.24): the reference look
+    // is "clean complexion, SHARP features" — so we split fine texture from
+    // facial structure much more decisively than Android.
+    //   * Fine texture (pores, blemishes, stubble shadow) is LOW-amplitude
+    //     micro-detail -> smooth it HARD (floor 0.18, cleaner + whiter than the
+    //     old 0.30 that left the skin busy).
+    //   * Facial STRUCTURE (nose/lip/brow/jaw edges + their definition shadows)
+    //     is HIGHER-amplitude -> protect it EARLIER and reach full detail
+    //     SOONER (band 0.045 -> 0.15, vs 0.065 -> 0.24) so raising Smooth no
+    //     longer drags the face's lines toward the blurred `low`. This is why
+    //     the earlier low floors read "plastic": the structure band started too
+    //     late, so real lines were still being smoothed at the low floor. With
+    //     the band pulled in, any actual line hits keep=1.0 well before it can
+    //     flatten, and only genuinely flat skin ever sees the floor.
     float3 high = scene - low;
     float amp = length(high);
-    float edge = smoothstep(0.055, 0.22, amp);
-    float keep = mix(0.35, 1.0, edge);
+    float structure = smoothstep(0.045, 0.15, amp);
+    float keep = mix(0.18, 1.0, structure);
     // iOS-ONLY: asymmetric retouch — blemishes are DARK micro-detail, the
     // skin's specular sheen (nose bridge, cheekbones, forehead glints) is
     // BRIGHT micro-detail. Keeping the bright side is what makes the face
     // read lit and alive instead of flat matte; the dark side still smooths.
     float sheen = smoothstep(0.01, 0.05, dot(high, LUMA));
     keep = max(keep, sheen * 0.85);
+    // iOS-ONLY: also protect the DARK structural shadows that give the face its
+    // 3D form (nose sides, under-lip, nasolabial, jawline) — but ONLY where the
+    // detail is strong enough to be a real contour, never a small blemish. A
+    // blemish is a shallow dark speck (low amp); a definition shadow is a
+    // deeper, extended tonal drop. Gating on amp keeps blemish removal intact
+    // while stopping Smooth from erasing the lines that make the face look real.
+    float defShadow = smoothstep(0.07, 0.16, amp) * smoothstep(0.005, 0.03, -dot(high, LUMA));
+    keep = max(keep, defShadow);
     float3 smoothed = low + high * keep;
     float3 c = mix(scene, smoothed, u.smooth * skin);
 
@@ -174,15 +192,18 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
                   * smoothstep(0.0, 0.06, outColor.g - outColor.b)
                   * smoothstep(0.15, 0.40, wLuma);
-    float3 pale = mix(outColor, float3(wLuma), 0.35);
-    pale += (float3(1.0) - pale) * 0.10;
-    outColor = mix(outColor, pale, u.glow * 0.5 * skinHue);
+    // iOS-ONLY: one notch whiter than the softest tuning (0.35/0.10/0.5) —
+    // the reference reads a little paler — while staying far from the heavy
+    // 0.70/0.24/1.0 that flattened the face into a doll mask.
+    float3 pale = mix(outColor, float3(wLuma), 0.40);
+    pale += (float3(1.0) - pale) * 0.14;
+    outColor = mix(outColor, pale, u.glow * 0.6 * skinHue);
     // A small multiplicative gain on the same skin-toned pixels keeps the face
     // reading bright and lit without shifting its (already matched) colour —
     // gain preserves hue/sat where a white-mix pales. Glow-gated like the rest
     // of the fair-skin block: every grade in this shader must vanish at
     // slider 0 so "Reset" means a raw frame.
-    outColor *= 1.0 + 0.04 * skinHue * u.glow;
+    outColor *= 1.0 + 0.05 * skinHue * u.glow;
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
