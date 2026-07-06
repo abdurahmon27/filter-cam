@@ -230,7 +230,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // and not a brightener. Screen-style toward white so it never clips hard.
     // Glow-driven (vanishes at Glow 0). ---
     float faceLit = smoothstep(0.50, 0.80, dot(outColor, LUMA));
-    outColor += (float3(1.0) - outColor) * (faceLit * skinHue * u.glow * 0.10);
+    // 0.10 -> 0.15: bring the luminous sheen back — ours had gone matte/flat vs
+    // the target's lit, dewy face. This is the "glow" that reads as premium.
+    outColor += (float3(1.0) - outColor) * (faceLit * skinHue * u.glow * 0.15);
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
@@ -269,9 +271,12 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // Green-trim eased (0.018 -> 0.010) so it's warm-golden, not magenta-pink;
     // red nudged up slightly for a healthy tan. Still gentle — a golden glow,
     // not a tan cast.
+    // Blue drop eased (-0.016 -> -0.010): combined with the global warm below,
+    // the double blue-cut made skin YELLOW/sallow. Keeping a bit more blue here
+    // restores the healthy ROSE in the gold so skin reads rosy-golden, not tan.
     outColor.r += 0.026 * rosy;
     outColor.g -= 0.010 * rosy;
-    outColor.b -= 0.016 * rosy;
+    outColor.b -= 0.010 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:
@@ -307,10 +312,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // not a yellow wash). Luma-gated so deep shadows / hair / brows stay neutral
     // and only mid-tones-and-up (walls, skin) warm. Kept subtle so whites stay
     // clean. Tune the 0.022 up/down for more/less overall warmth.
+    // Eased 0.022 -> 0.018 and DROPPED the green add (was +0.005): stacked with
+    // the golden skin tint this was over-warming into a YELLOW/sallow cast (and
+    // the green add tipped it olive). Pure R-up/B-down keeps a clean warm tilt
+    // on the whites/walls without yellowing skin.
     float wbGuard = smoothstep(0.06, 0.30, dot(outColor, LUMA));
-    outColor.r += 0.022 * wbGuard;
-    outColor.g += 0.005 * wbGuard;
-    outColor.b -= 0.022 * wbGuard;
+    outColor.r += 0.018 * wbGuard;
+    outColor.b -= 0.018 * wbGuard;
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
