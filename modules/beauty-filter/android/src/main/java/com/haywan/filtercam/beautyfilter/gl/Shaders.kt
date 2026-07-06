@@ -192,7 +192,10 @@ internal object Shaders {
             float skinHue = smoothstep(0.0, 0.12, outColor.r - outColor.g)
                           * smoothstep(0.0, 0.06, outColor.g - outColor.b)
                           * smoothstep(0.15, 0.40, wLuma);
-            vec3 pale = mix(outColor, vec3(wLuma), 0.35);
+            // Desat 0.34: enough graying to tame the skin's warm/orange
+            // SATURATION while leaving the undertone for the rosy tint below to
+            // turn pink. (0.30 let too much orange through.)
+            vec3 pale = mix(outColor, vec3(wLuma), 0.34);
             pale += (vec3(1.0) - pale) * 0.10;
             outColor = mix(outColor, pale, uGlow * 0.5 * skinHue);
             // A small multiplicative gain on the same skin-toned pixels keeps
@@ -216,16 +219,24 @@ internal object Shaders {
             float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
             outColor *= 1.0 - uSharp * 0.14 * shadow;
 
-            // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot
-            // re-add the warm cast the fair-skin grade removed. Trims the
-            // red-over-green excess on skin-toned pixels (porcelain, not
-            // orange) and returns a touch of blue to cool the tone. Glow-gated
-            // (it is the companion of the glow-driven fair-skin grade). ---
-            // Kept LIGHT: skin needs its warm red component to look alive —
-            // trimming it hard is a big contributor to the cartoon look.
-            float warmCast = outColor.r - outColor.g;
-            outColor.r -= warmCast * 0.08 * skinHue * uGlow;
-            outColor.b += warmCast * 0.04 * skinHue * uGlow;
+            // --- Rosy skin: the reference's fair skin carries a healthy
+            // RED/pink undertone ("red via white"), not a neutral/sallow tone.
+            // The OLD code here did the opposite — trimmed red and ADDED blue to
+            // cool the skin — which read colder than the target. Now we lift red
+            // a touch and trim a hint of blue on skin-toned pixels so fair skin
+            // reads pink-white. Runs AFTER vibrance/contrast so they cannot undo
+            // it. Glow-gated (companion of the glow-driven fair-skin whitening),
+            // rolled off on the brightest skin (highlightGuard) so nose/forehead
+            // glints stay clean white instead of turning pink. ---
+            float highlightGuard = 1.0 - smoothstep(0.72, 0.92, dot(outColor, LUMA));
+            float rosy = skinHue * uGlow * highlightGuard;
+            // Rose is a COOL pink, NOT a warm orange. Adding red and SUBTRACTING
+            // blue pushes skin yellow-orange; the correct move for pink-white
+            // skin is to trim the yellow/green (de-orange) with a small red lift
+            // and a hair of blue back, so the undertone reads rosy not tan.
+            outColor.r += 0.028 * rosy;
+            outColor.g -= 0.032 * rosy;
+            outColor.b += 0.008 * rosy;
 
             // --- Bright: gentle global gamma lift so the frame reads light and
             // airy (whiter walls/skin, the reference look). A gamma curve pins

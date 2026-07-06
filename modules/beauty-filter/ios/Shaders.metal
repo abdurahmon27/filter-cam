@@ -201,10 +201,11 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // iOS-ONLY: one notch whiter than the softest tuning (0.35/0.10/0.5) —
     // the reference reads a little paler — while staying far from the heavy
     // 0.70/0.24/1.0 that flattened the face into a doll mask.
-    // Desat eased 0.40->0.32: pulling skin so far toward gray was stripping the
-    // healthy RED undertone the target keeps — less graying here lets the rosy
-    // tint below read as pink-white rather than a flat pale.
-    float3 pale = mix(outColor, float3(wLuma), 0.32);
+    // Desat 0.36: enough graying to tame the skin's warm/orange SATURATION
+    // (ours read too tan) while still leaving the healthy undertone for the
+    // rosy tint below to turn pink. (Was 0.40 -> 0.32; 0.32 let too much orange
+    // through, 0.40 flattened to a pale — 0.36 sits between.)
+    float3 pale = mix(outColor, float3(wLuma), 0.36);
     pale += (float3(1.0) - pale) * 0.14;
     outColor = mix(outColor, pale, u.glow * 0.6 * skinHue);
     // A small multiplicative gain on the same skin-toned pixels keeps the face
@@ -240,8 +241,14 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // forehead glints stay clean white instead of turning pink. iOS-ONLY. ---
     float highlightGuard = 1.0 - smoothstep(0.72, 0.92, dot(outColor, LUMA));
     float rosy = skinHue * u.glow * highlightGuard;
-    outColor.r += 0.055 * rosy;
-    outColor.b -= 0.022 * rosy;
+    // Rose is a COOL pink, NOT a warm orange. The previous version added red and
+    // SUBTRACTED blue — which pushed skin yellow-orange, the opposite of the
+    // target. The correct move for pink-white skin is to trim the yellow/green
+    // (de-orange) with only a small red lift and a hair of blue back, so the
+    // undertone reads rosy rather than tan.
+    outColor.r += 0.028 * rosy;
+    outColor.g -= 0.032 * rosy;
+    outColor.b += 0.008 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:
