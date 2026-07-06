@@ -237,11 +237,17 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     outColor.r -= warmCast * 0.08 * skinHue * u.glow;
     outColor.b += warmCast * 0.04 * skinHue * u.glow;
 
-    // --- Bright: gentle global gamma lift so the frame reads light and airy
-    // (whiter walls/skin, the reference look). A gamma curve pins black and
-    // white, so hair keeps its depth and highlights never clip. Glow-driven
-    // (0.95 at full). ---
-    outColor = pow(clamp(outColor, 0.0, 1.0), float3(1.0 - 0.05 * u.glow));
+    // --- Bright: lift the whole frame toward the reference's light, airy
+    // exposure. Two stages, both glow-driven:
+    //   1. A multiplicative EXPOSURE gain — the real brightener. Because it
+    //      scales (0*g = 0), hair/brows/pupils stay dense while skin and walls
+    //      lift; the clamp lets near-white walls resolve to clean white. The
+    //      old shader had only the gamma below (a ~2% nudge at default glow),
+    //      which is why ours read darker than the target.
+    //   2. A gentle gamma for midtone airiness on top.
+    // iOS-ONLY TUNING. ---
+    outColor *= 1.0 + 0.28 * u.glow;
+    outColor = pow(clamp(outColor, 0.0, 1.0), float3(1.0 - 0.06 * u.glow));
 
     // --- Rich blacks: shadow toe applied LAST (the gamma above grays the
     // deepest tones; anything earlier gets re-lifted). Pulls sub-0.35-luma
