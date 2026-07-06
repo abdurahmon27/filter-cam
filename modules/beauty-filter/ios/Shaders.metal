@@ -265,9 +265,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // target. The correct move for pink-white skin is to trim the yellow/green
     // (de-orange) with only a small red lift and a hair of blue back, so the
     // undertone reads rosy rather than tan.
-    outColor.r += 0.036 * rosy;
-    outColor.g -= 0.042 * rosy;
-    outColor.b += 0.010 * rosy;
+    // Warmed a notch toward the target's golden rose (ours read a touch cool):
+    // easing the green trim (0.042 -> 0.030) and dropping the blue lift
+    // (0.010 -> 0.003) shifts a COOL pink toward a warm ROSE-GOLD. The green
+    // trim stays large enough that it can't slide back to orange.
+    outColor.r += 0.040 * rosy;
+    outColor.g -= 0.030 * rosy;
+    outColor.b += 0.003 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:
