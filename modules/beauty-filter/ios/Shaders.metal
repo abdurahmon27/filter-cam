@@ -99,43 +99,42 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float face   = faceTex.sample(s, in.uv).r;
 
     // --- Edge-aware skin smoothing (frequency separation) ---
-    // iOS-ONLY (Android keeps floor 0.35, band 0.065/0.24): the reference look
-    // is "clean complexion, SHARP features" — so we split fine texture from
-    // facial structure much more decisively than Android.
-    //   * Fine texture (pores, blemishes, stubble shadow) is LOW-amplitude
-    //     micro-detail -> smooth it HARD (floor 0.18, cleaner + whiter than the
-    //     old 0.30 that left the skin busy).
-    //   * Facial STRUCTURE (nose/lip/brow/jaw edges + their definition shadows)
-    //     is HIGHER-amplitude -> protect it EARLIER and reach full detail
-    //     SOONER (band 0.045 -> 0.15, vs 0.065 -> 0.24) so raising Smooth no
-    //     longer drags the face's lines toward the blurred `low`. This is why
-    //     the earlier low floors read "plastic": the structure band started too
-    //     late, so real lines were still being smoothed at the low floor. With
-    //     the band pulled in, any actual line hits keep=1.0 well before it can
-    //     flatten, and only genuinely flat skin ever sees the floor.
+    // iOS-ONLY (Android keeps floor 0.35, band 0.065/0.24). Three signals decide
+    // how much fine detail (`high`) survives on skin:
+    //   1. structure  — real edges/contours (high amp) keep FULL detail so the
+    //      face stays sharp; genuinely flat skin keeps a texture floor (not waxy).
+    //   2. sheen      — the skin's BRIGHT specular micro-detail (nose bridge,
+    //      cheekbones, forehead glints) is kept so the face reads lit, not matte.
+    //   3. darkSpot   — the mole/blemish REMOVER (see below).
     float3 high = scene - low;
     float amp = length(high);
+    float highL = dot(high, LUMA);      // + brighter than skin, - darker (spots)
+    float lowL  = dot(low, LUMA);       // local skin brightness (bright cheek vs dark beard)
+
     float structure = smoothstep(0.045, 0.15, amp);
-    // Floor 0.40 (iOS-ONLY): MODERATE smoothing that KEEPS skin texture — the
-    // reference look is natural, not waxy. An earlier 0.18 floor scrubbed the
-    // complexion so hard the face read like plastic. The tight structure band
-    // above still protects the face's lines, so this only affects genuinely
-    // flat skin: enough pore/texture survives that the face stays real.
+    // Floor 0.40: MODERATE smoothing that KEEPS skin texture — natural, not waxy.
     float keep = mix(0.40, 1.0, structure);
-    // iOS-ONLY: asymmetric retouch — blemishes are DARK micro-detail, the
-    // skin's specular sheen (nose bridge, cheekbones, forehead glints) is
-    // BRIGHT micro-detail. Keeping the bright side is what makes the face
-    // read lit and alive instead of flat matte; the dark side still smooths.
-    float sheen = smoothstep(0.01, 0.05, dot(high, LUMA));
+
+    // --- Mole / blemish / blotch remover (iOS-ONLY) ---
+    // A mole is a distinct DARK spot, so the amp detector above mistakes it for
+    // an "edge" and PROTECTS it — which is why ours kept moles sharp while the
+    // target fades them. Fix: wherever a DARK detail (highL < 0) sits on BRIGHT
+    // skin (lowL high), force `keep` down so the spot melts into the complexion.
+    //   * gated to bright skin (onBrightSkin) so the dark BEARD/hair — dark
+    //     detail on DARK surroundings — is spared, not blurred into mush;
+    //   * scales with how dark the spot is, so moles/blotches fade while flat
+    //     skin is untouched.
+    // The old `defShadow` term did the OPPOSITE (it preserved dark detail) and
+    // is removed — it was the main reason moles survived.
+    float onBrightSkin = smoothstep(0.34, 0.55, lowL);
+    float darkSpot = smoothstep(0.02, 0.10, -highL) * onBrightSkin;
+    keep = mix(keep, 0.12, darkSpot);
+
+    // Preserve bright specular sheen LAST so a spot-remove can never dull the
+    // face's natural highlights.
+    float sheen = smoothstep(0.01, 0.05, highL);
     keep = max(keep, sheen * 0.85);
-    // iOS-ONLY: also protect the DARK structural shadows that give the face its
-    // 3D form (nose sides, under-lip, nasolabial, jawline) — but ONLY where the
-    // detail is strong enough to be a real contour, never a small blemish. A
-    // blemish is a shallow dark speck (low amp); a definition shadow is a
-    // deeper, extended tonal drop. Gating on amp keeps blemish removal intact
-    // while stopping Smooth from erasing the lines that make the face look real.
-    float defShadow = smoothstep(0.07, 0.16, amp) * smoothstep(0.005, 0.03, -dot(high, LUMA));
-    keep = max(keep, defShadow);
+
     float3 smoothed = low + high * keep;
     float3 c = mix(scene, smoothed, u.smooth * skin);
 
