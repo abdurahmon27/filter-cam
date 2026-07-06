@@ -129,7 +129,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // The old `defShadow` term did the OPPOSITE (it preserved dark detail) and
     // is removed — it was the main reason moles survived.
     float onBrightSkin = smoothstep(0.34, 0.55, lowL);
-    float darkSpot = smoothstep(0.015, 0.09, -highL) * onBrightSkin;
+    // Onset 0.015 -> 0.013: reach the FAINTER freckles/spots (lower-contrast
+    // than a mole) that were slipping under the threshold and left the cheeks
+    // uneven vs the reference.
+    float darkSpot = smoothstep(0.013, 0.09, -highL) * onBrightSkin;
     keep = mix(keep, 0.08, darkSpot);
 
     // Preserve bright specular sheen LAST so a spot-remove can never dull the
@@ -146,7 +149,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // reference look's uniform complexion (red patches, under-eye). ---
     float cl = dot(c, LUMA);
     float3 localTone = low + (cl - dot(low, LUMA));
-    c = mix(c, localTone, u.clarity * skin * 0.7);
+    // 0.7 -> 0.80: stronger tone-evening so the faint cheek freckles / uneven
+    // patches that the (dark-spot) blemish remover leaves behind blend into a
+    // uniform complexion, like the reference.
+    c = mix(c, localTone, u.clarity * skin * 0.80);
     float sl = dot(c, LUMA);
     // iOS-ONLY (Android keeps 0.08): a touch more saturation so the evened
     // skin keeps warm colour depth — part of the "alive" look.
@@ -215,6 +221,18 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // of the fair-skin block: every grade in this shader must vanish at
     // slider 0 so "Reset" means a raw frame.
     outColor *= 1.0 + 0.05 * skinHue * u.glow;
+
+    // --- Dewy skin (iOS-ONLY): lift the LIT parts of the skin — cheekbones,
+    // nose bridge, forehead — with a soft luminous highlight so the face reads
+    // DEWY and 3D instead of flat/matte. This is the main quality that set the
+    // reference apart from ours: same smoothing, but theirs GLOWS. Gated to
+    // skin-toned pixels (skinHue) AND to already-bright ones (faceLit) so it
+    // ADDS dimension to the highlights rather than washing the whole face flat —
+    // mid-tones and shadowed skin stay put, which is what makes it read as sheen
+    // and not a brightener. Screen-style toward white so it never clips hard.
+    // Glow-driven (vanishes at Glow 0). ---
+    float faceLit = smoothstep(0.50, 0.80, dot(outColor, LUMA));
+    outColor += (float3(1.0) - outColor) * (faceLit * skinHue * u.glow * 0.16);
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
