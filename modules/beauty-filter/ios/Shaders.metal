@@ -148,10 +148,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // reference look's uniform complexion (red patches, under-eye). ---
     float cl = dot(c, LUMA);
     float3 localTone = low + (cl - dot(low, LUMA));
-    // 0.7 -> 0.80: stronger tone-evening so the faint cheek freckles / uneven
-    // patches that the (dark-spot) blemish remover leaves behind blend into a
-    // uniform complexion, like the reference.
-    c = mix(c, localTone, u.clarity * skin * 0.80);
+    // 0.74: eased from 0.80 — the target's complexion is natural, not perfectly
+    // uniform, so lighter tone-evening keeps some real variation in the skin.
+    c = mix(c, localTone, u.clarity * skin * 0.74);
     float sl = dot(c, LUMA);
     // iOS-ONLY (Android keeps 0.08): a touch more saturation so the evened
     // skin keeps warm colour depth — part of the "alive" look.
@@ -231,7 +230,7 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // and not a brightener. Screen-style toward white so it never clips hard.
     // Glow-driven (vanishes at Glow 0). ---
     float faceLit = smoothstep(0.50, 0.80, dot(outColor, LUMA));
-    outColor += (float3(1.0) - outColor) * (faceLit * skinHue * u.glow * 0.16);
+    outColor += (float3(1.0) - outColor) * (faceLit * skinHue * u.glow * 0.10);
 
     // --- Life: global micro-contrast + vibrance so the image looks alive.
     // Fully sharp-driven (identity at 0; full-slider values match the old
@@ -264,13 +263,15 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // target. The correct move for pink-white skin is to trim the yellow/green
     // (de-orange) with only a small red lift and a hair of blue back, so the
     // undertone reads rosy rather than tan.
-    // Warmed a notch toward the target's golden rose (ours read a touch cool):
-    // easing the green trim (0.042 -> 0.030) and dropping the blue lift
-    // (0.010 -> 0.003) shifts a COOL pink toward a warm ROSE-GOLD. The green
-    // trim stays large enough that it can't slide back to orange.
-    outColor.r += 0.040 * rosy;
-    outColor.g -= 0.030 * rosy;
-    outColor.b += 0.003 * rosy;
+    // Shifted from a cool PINK toward the target's GOLDEN-warm skin (ours read
+    // pale/cool). The key move is dropping BLUE (b: +0.003 -> -0.016) — that
+    // warms skin to gold WITHOUT the red/green boost that would tip it orange.
+    // Green-trim eased (0.018 -> 0.010) so it's warm-golden, not magenta-pink;
+    // red nudged up slightly for a healthy tan. Still gentle — a golden glow,
+    // not a tan cast.
+    outColor.r += 0.026 * rosy;
+    outColor.g -= 0.010 * rosy;
+    outColor.b -= 0.016 * rosy;
 
     // --- Bright: lift the whole frame toward the reference's light, airy
     // exposure. Two stages, both glow-driven:
