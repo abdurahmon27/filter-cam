@@ -112,10 +112,10 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float lowL  = dot(low, LUMA);       // local skin brightness (bright cheek vs dark beard)
 
     float structure = smoothstep(0.045, 0.15, amp);
-    // Floor 0.32: smoother than 0.40 (the target's complexion is cleaner) while
-    // staying well above the waxy 0.18. The tight structure band still keeps the
-    // face's real lines sharp, so this only cleans genuinely flat skin further.
-    float keep = mix(0.32, 1.0, structure);
+    // Floor 0.38: the target keeps NATURAL skin texture (visible pores on nose/
+    // cheeks) — ours at 0.32 was over-smoothing past it into a poreless look.
+    // 0.38 leaves more texture so the complexion reads real, like theirs.
+    float keep = mix(0.38, 1.0, structure);
 
     // --- Mole / blemish / blotch remover (iOS-ONLY) ---
     // A mole is a distinct DARK spot, so the amp detector above mistakes it for
@@ -129,10 +129,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // The old `defShadow` term did the OPPOSITE (it preserved dark detail) and
     // is removed — it was the main reason moles survived.
     float onBrightSkin = smoothstep(0.34, 0.55, lowL);
-    // Onset 0.015 -> 0.013: reach the FAINTER freckles/spots (lower-contrast
-    // than a mole) that were slipping under the threshold and left the cheeks
-    // uneven vs the reference.
-    float darkSpot = smoothstep(0.013, 0.09, -highL) * onBrightSkin;
+    // Onset 0.015: back off from 0.013 — the target KEEPS faint freckles/texture,
+    // so only clearly-dark spots (real moles/blotches) should be removed.
+    float darkSpot = smoothstep(0.015, 0.09, -highL) * onBrightSkin;
     keep = mix(keep, 0.08, darkSpot);
 
     // Preserve bright specular sheen LAST so a spot-remove can never dull the
