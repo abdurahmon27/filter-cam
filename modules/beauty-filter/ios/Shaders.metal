@@ -302,23 +302,12 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float toeL = dot(outColor, LUMA);
     outColor *= 1.0 - 0.20 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
-    // --- Global warm white-balance (iOS-ONLY, ALWAYS-ON) ---
-    // The iPhone front camera runs COOL; the reference app warms the WHOLE frame
-    // (walls, skin, shirt), which is the last thing separating ours from theirs.
-    // This is deliberately the ONE grade NOT tied to a slider (approved) — it
-    // shifts the base white balance warm so the frame matches the target out of
-    // the box; "Reset" is therefore warm-corrected, not the raw sensor frame.
-    // A symmetric R-up / B-down tilt reads as a clean warm cast (an amber tilt,
-    // not a yellow wash). Luma-gated so deep shadows / hair / brows stay neutral
-    // and only mid-tones-and-up (walls, skin) warm. Kept subtle so whites stay
-    // clean. Tune the 0.022 up/down for more/less overall warmth.
-    // Eased 0.022 -> 0.018 and DROPPED the green add (was +0.005): stacked with
-    // the golden skin tint this was over-warming into a YELLOW/sallow cast (and
-    // the green add tipped it olive). Pure R-up/B-down keeps a clean warm tilt
-    // on the whites/walls without yellowing skin.
-    float wbGuard = smoothstep(0.06, 0.30, dot(outColor, LUMA));
-    outColor.r += 0.018 * wbGuard;
-    outColor.b -= 0.018 * wbGuard;
+    // NOTE: an always-on GLOBAL warm white-balance used to live here. REMOVED —
+    // it warmed the WHOLE frame (walls/ceiling/shirt), but the reference app
+    // only beautifies the FACE and leaves the background as the raw camera feed.
+    // Warmth now comes solely from the skinHue-gated skin tint earlier in this
+    // pass, which touches skin-toned pixels (face/neck) only — so the background
+    // stays raw/cool like the target. Do NOT re-add a global tint here.
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }

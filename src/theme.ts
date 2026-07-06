@@ -70,7 +70,10 @@ export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
   smooth: 0.75,
   glow: 0.4,
   clarity: 0.55,
-  warm: 0.08,
+  // Warm default 0: the iOS composite now applies an always-on warm white-
+  // balance baseline in-shader, so the Warm slider no longer needs to add any
+  // on top — it starts neutral and is there for the user to dial up if wanted.
+  warm: 0,
   // Lower default sharp: it drives the micro-contrast, shadow toe and sharpen,
   // so a high default was the main reason the look read as an OBVIOUS filter
   // (higher contrast, more noise, harsher beard) vs the natural reference.
