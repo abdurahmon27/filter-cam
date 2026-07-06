@@ -411,7 +411,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         // acutance restored; on iOS the 1440-wide capture DOWNSCALES to the
         // display, so the same base over-etches (drawn-on eyelashes) and
         // re-amplifies sensor noise (grainy nose).
-        var amount: Float = 0.35 + clamp01(sharpness) * 0.55
+        // Trimmed the always-on base 0.35->0.18 and the slope 0.55->0.42: the
+        // reference reads SOFTER, and the old base made the frame look noisy/
+        // over-detailed even at sharp=0. Real edges still get acutance.
+        var amount: Float = 0.18 + clamp01(sharpness) * 0.42
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentBytes(&texel, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
         encoder.setFragmentBytes(&amount, length: MemoryLayout<Float>.stride, index: 1)

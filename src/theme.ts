@@ -71,8 +71,13 @@ export const DEFAULT_INTENSITIES: Record<FilterId, number> = {
   glow: 0.4,
   clarity: 0.55,
   warm: 0.08,
-  sharp: 0.3,
-  eyes: 0.15,
-  nose: 0.2,
-  slim: 0.42,
+  // Lower default sharp: it drives the micro-contrast, shadow toe and sharpen,
+  // so a high default was the main reason the look read as an OBVIOUS filter
+  // (higher contrast, more noise, harsher beard) vs the natural reference.
+  sharp: 0.2,
+  // Stronger default reshape: the target has a SLIGHT V-line / bigger eyes /
+  // slimmer nose that ours barely showed. Still subtle, still user-dialable.
+  eyes: 0.22,
+  nose: 0.3,
+  slim: 0.55,
 };

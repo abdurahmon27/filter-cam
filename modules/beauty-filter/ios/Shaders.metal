@@ -116,7 +116,12 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     float3 high = scene - low;
     float amp = length(high);
     float structure = smoothstep(0.045, 0.15, amp);
-    float keep = mix(0.18, 1.0, structure);
+    // Floor 0.40 (iOS-ONLY): MODERATE smoothing that KEEPS skin texture — the
+    // reference look is natural, not waxy. An earlier 0.18 floor scrubbed the
+    // complexion so hard the face read like plastic. The tight structure band
+    // above still protects the face's lines, so this only affects genuinely
+    // flat skin: enough pore/texture survives that the face stays real.
+    float keep = mix(0.40, 1.0, structure);
     // iOS-ONLY: asymmetric retouch — blemishes are DARK micro-detail, the
     // skin's specular sheen (nose bridge, cheekbones, forehead glints) is
     // BRIGHT micro-detail. Keeping the bright side is what makes the face
@@ -160,8 +165,9 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // Runs before bloom/warmth so those global grades are not re-amplified. ---
     // iOS-ONLY TUNING (Android keeps 0.35): softer structure boost — the
     // iPhone feed is already crisp, and the full boost etched lashes/brows
-    // into a hard, drawn-on outline.
-    outColor += (outColor - low) * (u.sharp * 0.28 * (1.0 - skin * 0.8));
+    // into a hard, drawn-on outline. Trimmed further (0.28->0.18) so the
+    // overall result reads as a NATURAL beauty pass, not an obvious filter.
+    outColor += (outColor - low) * (u.sharp * 0.18 * (1.0 - skin * 0.8));
     outColor = clamp(outColor, 0.0, 1.0);
 
     // --- Glow (bloom): screen-blend the blurred scene's own soft highlights,
@@ -214,10 +220,11 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
 
     // --- Sharp (rich colour): deepen the shadows so dark hair, brows and
     // beard read dense and truly dark instead of lifted/washed.
-    // iOS-ONLY TUNING (Android keeps 0.14): trimmed — together with the toe
-    // it was blackening lashes/brows into an eyeliner look. ---
+    // iOS-ONLY TUNING (Android keeps 0.14): trimmed hard (0.10->0.05) — this
+    // and the toe were giving the BEARD a harsh, over-contrasty edge vs the
+    // reference's softer blend, and darkening the whole image. ---
     float shadow = 1.0 - smoothstep(0.04, 0.50, dot(outColor, LUMA));
-    outColor *= 1.0 - u.sharp * 0.10 * shadow;
+    outColor *= 1.0 - u.sharp * 0.05 * shadow;
 
     // --- Skin neutralize: runs AFTER vibrance/contrast so they cannot re-add
     // the warm cast the fair-skin grade removed. Trims the red-over-green
@@ -240,12 +247,13 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
     // deepest tones; anything earlier gets re-lifted). Pulls sub-0.35-luma
     // tones toward true black so hair, brows, beard and pupils read dense.
     // Skin sits well above the toe, so the face brightness/whitening is
-    // untouched. sharp-driven (up to 35% at full — iOS-ONLY TUNING, Android
-    // keeps 25%: the iPhone's flatter feed needs the stronger toe for the
-    // reference-app black density). Pure ALU in this same pass — no extra
-    // texture reads, no performance cost. ---
+    // untouched. sharp-driven (up to 20% at full — iOS-ONLY TUNING dialled
+    // back from 0.35: that heavy toe crushed shadows into HIGH contrast and
+    // made the whole frame read dark/flat vs the reference's lower-contrast,
+    // brighter look. 0.20 keeps hair/pupils dense without the harshness). Pure
+    // ALU in this same pass — no extra texture reads, no performance cost. ---
     float toeL = dot(outColor, LUMA);
-    outColor *= 1.0 - 0.35 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
+    outColor *= 1.0 - 0.20 * u.sharp * (1.0 - smoothstep(0.0, 0.35, toeL));
 
     return float4(clamp(outColor, 0.0, 1.0), 1.0);
 }
